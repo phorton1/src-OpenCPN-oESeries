@@ -1,0 +1,35 @@
+#
+# Minimal flatpak manifest for oESeries.
+#
+# The OpenCPN plugin CMake framework (cmake/ConfigureManifest.cmake, invoked by
+# create_targets) parses this file at EVERY configure - even on Windows - and
+# FATAL_ERRORs if it cannot find a valid 'id:' line. So it must exist and be
+# well-formed. It is NOT used to actually build on Windows.
+#
+# Deliberately OMITS any '@include opencpn-libs/flatpak/*.yaml' line: oESeries is
+# authored without an in-tree opencpn-libs, so ConfigureManifest would fail trying
+# to read the included file. Tokens @plugin_name / @app_id are handled by the
+# framework (see cmake/ConfigureManifest.cmake).
+#
+id: org.opencpn.OpenCPN.Plugin.@plugin_name
+
+runtime: org.opencpn.OpenCPN
+runtime-version: stable
+sdk: org.freedesktop.Sdk//24.08
+build-extension: true
+separate-locales: false
+appstream-compose: false
+
+modules:
+    - name: @app_id
+      no-autogen: true
+      buildsystem: cmake
+      config-opts:
+          - -DCMAKE_INSTALL_PREFIX=/app/extensions/@app_id
+          - -DCMAKE_BUILD_TYPE:STRING=Release
+          - -DBUILD_TYPE:STRING=tarball
+          - -Uplugin_target
+      sources:
+          - type: git
+            url: ..
+            branch: HEAD
