@@ -173,22 +173,35 @@ the in-memory ocdb (a spoke projection), never canonical navMate.db, so `navmate
 advances on an echo and no new command is minted. `results[]` is the independent per-command
 ack, consumed before the reconcile.
 
-### Shared risks carried from the lock
+### Shared risks carried from the lock -- all three BENCH-MEASURED 2026-07-05
 
-- **R1 (layer leakage, plugin-side).** api-20 layer exclusion (`OBJECTS_NO_LAYERS`) may be a
-  stub in 5.12.4 (sits under a literal `// FIXME (dave) Implement these`). Until bench-verified,
-  read-only layer objects MAY leak into `marks[]`/`routes[]`, and a pushed edit/delete to a
-  layer-origin object may fail or no-op. The hub stays defensive: tolerate unexpected inbound
-  objects; NEVER assume a push succeeded -- read `results[].ok` and re-drive/abort on error.
-- **R2 (write-side vertex GUID, unverified).** Whether `AddPlugInRouteExV2` honors caller
-  per-vertex `m_GUID` (as `AddSingleWaypointEx` provably does, sec 4) is core-source behavior
-  not readable from the header. **No route round-trip GUID-preservation claim until
-  bench-proven.** The test_plan's route-identity assertion is a Mode-2 bench item, not a schema
-  guarantee.
-- **R3 (string encoding).** Names/descriptions/icons carry arbitrary UTF-8 (quotes, newlines,
-  CJK, emoji, combining marks). Both sides use standard JSON escaping (navMate `JSON::PP`,
-  plugin nlohmann). A shared "nasty strings" conformance fixture proves escaping both ways, not
-  just happy-path ASCII.
+Measured in the Mode-2 alpha (`notes/build_and_test_oe.md`), real plugin vs live hub. These are
+no longer open risks; the results are recorded here.
+
+- **R1 (layer leakage, plugin-side) -- MEASURED: LEAKS (transient).** api-20 layer exclusion
+  (`OBJECTS_NO_LAYERS`) IS a stub in 5.12.4 (the `// FIXME (dave)`). Bench-proven by staging a
+  read-only GPX layer: `GetWaypointGUIDArray` returns layer marks AND layer-route vertices,
+  `GetRouteGUIDArray` returns the layer route -- they leak into `marks[]`/`routes[]` and reach the
+  hub (which minted `0x4f` for the foreign layer guids). The leak is TRANSIENT (layer objects are
+  read-only overlays, not in navobj.db; they vanish from the sync the moment the layer is unloaded,
+  proven by a full-state-replace re-sync dropping them). Mitigations: **plugin-side** -- try the
+  layer-aware `GetRouteGUIDArray/GetTrackGUIDArray(OBJECT_LAYER_REQ)` overloads + a per-mark layer
+  check, and make `diag inventory.layer_seen` real (currently a stub). **Hub-side** -- the wire
+  cannot mark a layer object, so the hub rightly tolerates unexpected inbound and reads
+  `results[].ok` (a push back to a read-only layer object no-ops). Non-corrupting.
+- **R2 (write-side vertex GUID) -- MEASURED: PASS.** `AddPlugInRouteExV2` **preserves the caller's
+  per-vertex `m_GUID` verbatim** (bench-proven: pushed a route with 3 navMate-origin vertex guids;
+  the plugin's `diag object` readback via `GetRouteExV2_Plugin` returned the exact same 3 guids, and
+  the hub minted 0 new provenance bytes -- reversed table-free). **Routes round-trip by vertex
+  IDENTITY, not just position/order.** (Same holds for `AddSingleWaypointExV2` marks, sec 4, and
+  `AddPlugInTrack` tracks -- write-side guid preservation confirmed for all three object types.)
+- **R3 (string encoding) -- MEASURED: PASS (codepoint-equality).** Names/descriptions/icons carry
+  arbitrary UTF-8. Both sides emit strict-ASCII JSON (non-ASCII as `\uXXXX`, astral as surrogate
+  pairs -- navMate `JSON::PP` ascii, plugin nlohmann `ensure_ascii=true`), so the wire is pure ASCII
+  both directions (no HTTP charset ambiguity). The "nasty strings" fixture (quote, backslash, tab,
+  newline, forward slash, CJK U+6D77, astral emoji U+1F6A3, combining U+0301, a 0x01 control)
+  round-trips **codepoint-equal** both ways. Compare strings by codepoint after parse, numbers
+  numerically -- never byte-compare (shortest-repr doubles and escaping differ, values don't).
 
 ## 3. The two-DT version gate
 

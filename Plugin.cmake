@@ -59,6 +59,7 @@ set(SRC
     src/oeSeries_log.cpp
     src/oeSeries_http.h
     src/oeSeries_http.cpp
+    src/json.hpp            # vendored nlohmann/json v3.11.3 (header-only)
 )
 
 set(PKG_API_LIB api-20)  #  A dir in opencpn_libs/ e.g., api-20 or api-19

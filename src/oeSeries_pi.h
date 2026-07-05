@@ -81,9 +81,17 @@ private:
     bool LoadConfig();
     bool SaveConfig();
 
-    // Main-thread: enumerate OpenCPN's waypoints, hash them, and (on change)
-    // advance m_dt_ocpn and rebuild m_payload.
+    // Main-thread: enumerate OpenCPN's model, hash it, and (on change) advance
+    // m_dt_ocpn and rebuild the cached inventory arrays (m_marks/routes/tracks_json).
     void EnumerateAndBuild();
+
+    // Assemble the full POST body {dt, marks, routes, tracks, results} from the
+    // cached inventory arrays + any pending results[] (sec 2A).
+    wxString BuildPostBody();
+
+    // M3: parse a GET view's commands[] (nlohmann), apply each on the main thread
+    // (merge-on-apply, sec 8; diag channel), stash results[] for the next POST.
+    void ApplyGetView(const wxString &body);
 
     wxFileConfig *m_config;
     wxWindow *m_parent_window;
@@ -99,13 +107,28 @@ private:
     unsigned long long m_dt_ocpn;    // my DT token (minted only by oESeries)
     unsigned long long m_last_hash;  // FNV-1a of the last enumerated inventory
     bool m_have_hash;                // false until the first enumeration
-    int m_wp_count;                  // waypoints in the last inventory
-    wxString m_payload;              // current inventory JSON, ready to POST
+    int m_wp_count;                  // distinct marks in the last inventory
+    int m_route_count;               // routes in the last inventory (diag)
+    int m_track_count;               // tracks in the last inventory (diag)
+    int m_vertices_seen;             // embedded route vertices last inventory (diag)
+
+    // Cached inventory arrays (serialized JSON, ASCII), rebuilt on change; the
+    // POST body is assembled from these + m_pending_results at send time.
+    bool m_have_inventory;           // true after the first EnumerateAndBuild
+    wxString m_marks_json;           // last marks[]  (e.g. "[{...},...]")
+    wxString m_routes_json;          // last routes[]
+    wxString m_tracks_json;          // last tracks[]
 
     bool m_want_post;                // last GET showed navMate behind -> POST
     long long m_navmate_dt;          // last navmate_dt seen (0 until db gate)
     bool m_synced;                   // navMate has acknowledged our current DT
     bool m_reachable;                // navMate answered our last request
+
+    // M3 apply/echo state
+    wxString m_pending_results;      // results[] to attach to the next POST ("" = none)
+    long long m_last_applied_batch;  // count of applied command batches (diag state)
+    long long m_echo_baseline_dt;    // DT_ocpn snapshot at last apply (echo marker)
+    unsigned long long m_echo_baseline_hash;  // hash snapshot at last apply
 
     wxBitmap m_panel_bitmap;
 };
