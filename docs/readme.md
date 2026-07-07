@@ -4,7 +4,8 @@
 **[Design](design.md)** --
 **[Protocol](protocol.md)** --
 **[Implementation](implementation.md)** --
-**[Build](build.md)**
+**[Build](build.md)** --
+**[Releases](releases.md)**
 
 **oESeries** is a C++ plugin for [**OpenCPN**](https://opencpn.org) that mirrors
 OpenCPN's **waypoints, routes, and tracks** to and from an external hub over a small

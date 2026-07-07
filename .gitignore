@@ -16,3 +16,7 @@ cmake-build-*/
 # OS cruft
 Thumbs.db
 Desktop.ini
+
+# Untracked internal build counter (drives X.Y.Z.NNN); the EXTERNAL version stays a
+# clean X.Y.Z, and release tarballs are tracked under releases/ (NOT ignored).
+/build_number.txt

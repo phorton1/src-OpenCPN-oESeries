@@ -37,6 +37,7 @@
 #include <time.h>
 
 #include "config.h"
+#include "oe_buildnum.h"   // generated per build: PLUGIN_VERSION_FULL "X.Y.Z.NNN"
 #include "oeSeries_pi.h"
 #include "oeSeries_log.h"
 #include "oeSeries_http.h"
@@ -47,6 +48,12 @@
 // straight from the model doubles (protocol.md sec 2A).
 #include "json.hpp"
 
+// S3 symbol channel: self-verified SHA-256 (icon_hash / byte_hash, sec 7) + wx
+// base64 and memory streams for PNG <-> base64 icon transcode.
+#include "oe_sha256.h"
+#include <wx/base64.h>
+#include <wx/mstream.h>
+
 // The api-20 header WX_DECLARE_LISTs these waypoint lists, but only OpenCPN core
 // carries the matching WX_DEFINE_LIST - the node vtable (DeleteData) isn't exported
 // to plugins. Enumeration only ITERATES core-owned lists (inline, fine), but to
@@ -55,6 +62,20 @@
 #include <wx/listimpl.cpp>
 WX_DEFINE_LIST(Plugin_WaypointExV2List);
 WX_DEFINE_LIST(Plugin_WaypointList);
+WX_DEFINE_LIST(Plugin_HyperlinkList);   // for rebuilding m_HyperlinkList on apply (S2)
+
+// wxColour <-> "#RRGGBB" wire form (sec 2A: the ONE color on the wire, range rings).
+static wxString ColorToHex(const wxColour &c)
+{
+    if (!c.IsOk())
+        return wxString("#000000");
+    return wxString::Format("#%02X%02X%02X", c.Red(), c.Green(), c.Blue());
+}
+static wxColour HexToColor(const wxString &s)
+{
+    wxColour c(s);   // wxColour parses "#RRGGBB"
+    return c.IsOk() ? c : wxColour(0, 0, 0);
+}
 
 // Preference keys / defaults
 static const char *const CONFIG_PATH = "/PlugIns/oESeries";
@@ -65,8 +86,20 @@ static const long DEFAULT_DEBUG_LEVEL = 0;
 // Heartbeat cadence and the endpoint. One request per tick, single-flight.
 static const int POLL_INTERVAL_MS = 2000;
 static const char *const OCPN_API_PATH = "/api/ocpn";
+static const char *const OCPN_ICONS_PATH = "/api/ocpn?icons=1";
 static const int TAG_GET = 1;
 static const int TAG_POST = 2;
+static const int TAG_ICONS = 3;   // GET ?icons=1 (Direction B pull, sec 7)
+
+// navMate keys its injected icons with this prefix (sec 7): a table-free magic
+// recognizer, coexisting with OpenCPN built-ins. The plugin filters nm:* out of
+// icon_hash (Direction A self-echo) and gates nm:* command apply on registration.
+static const char *const NM_ICON_PREFIX = "nm:";
+
+// The wire protocol version this plugin speaks (protocol.md "Versioning"). Self-announced
+// in every POST; the hub announces its own in the GET view. MAJOR.MINOR; absent == "1.0"
+// baseline. Soft floor: below our MAJOR we warn but keep functioning.
+static const char *const OE_PROTOCOL_VERSION = "1.0";
 
 // Definition of the global declared in oeSeries_pi.h
 int g_oeseries_debug_level = 0;
@@ -90,11 +123,20 @@ private:
 //    Small helpers: DT formatting, host:port parse, JSON build + minimal parse.
 //----------------------------------------------------------------------------
 
-// A snapshot of one waypoint's sync-relevant fields (the two-way "carried" set,
-// protocol.md sec 6). `visible` is dropped in v1; `created_ts` (UTC epoch secs,
-// 0 if unset) is added.
+// One hyperlink (sec 2A mark.hyperlinks[] <-> Plugin_Hyperlink).
+struct HlEntry
+{
+    wxString desc;   // DescrText
+    wxString link;   // Link
+    wxString type;   // Type
+};
+
+// A snapshot of one waypoint's sync-relevant fields (protocol.md sec 6). Carries
+// the A fields (guid/name/lat/lon/description/icon/created_ts) plus the full
+// OpenCPN-only B superset (sec 2A extended mark), all read from PlugIn_Waypoint_ExV2.
 struct WpEntry
 {
+    // A (mappable, carried both ways)
     wxString guid;
     wxString name;
     wxString desc;
@@ -102,6 +144,23 @@ struct WpEntry
     double lat;
     double lon;
     long long created_ts;
+    // B (OpenCPN-only, spoke-carried; sec 6)
+    bool visible;           // IsVisible
+    bool name_shown;        // IsNameVisible
+    bool active;            // IsActive [R, up-only]
+    double scamin;          // scamin
+    bool scamin_on;         // b_useScamin
+    double scamax;          // scamax
+    double arrival_radius;  // m_WaypointArrivalRadius
+    double planned_speed;   // m_PlannedSpeed
+    long long etd;          // m_ETD epoch secs; 0 = unset
+    wxString tide_station;  // m_TideStation
+    int rr_count;           // nrange_rings
+    double rr_space;        // RangeRingSpace
+    int rr_units;           // RangeRingSpaceUnits (0:nm 1:km)
+    wxString rr_color;      // RangeRingColor "#RRGGBB"
+    bool rr_show;           // m_bShowWaypointRangeRings
+    std::vector<HlEntry> hyperlinks;
 };
 
 // wxString -> UTF-8 std::string, for nlohmann string assignment.
@@ -121,12 +180,13 @@ static void FnvUpdate(unsigned long long &h, const wxString &s)
     }
 }
 
-// Copy the carried mark fields (sec 6) out of any api-20 waypoint struct sharing
-// the PlugIn_Waypoint_Ex[V2] field names (marks and route vertices both qualify).
-template <typename WP>
-static WpEntry WpEntryFrom(const WP &wp)
+// Copy the carried mark fields (sec 6, A + full B superset) out of a live
+// PlugIn_Waypoint_ExV2 (marks and route vertices both qualify - ExV2 exposes every
+// reachable field; that is why enumeration reads ExV2, not the V1 Ex struct).
+static WpEntry WpEntryFrom(const PlugIn_Waypoint_ExV2 &wp)
 {
     WpEntry e;
+    // A
     e.guid = wp.m_GUID;
     e.name = wp.m_MarkName;
     e.desc = wp.m_MarkDescription;
@@ -136,6 +196,40 @@ static WpEntry WpEntryFrom(const WP &wp)
     // created_ts = m_CreateTime (UTC); 0 when unset (sec 2A: 0 = unknown).
     e.created_ts = wp.m_CreateTime.IsValid()
                  ? (long long)wp.m_CreateTime.GetTicks() : 0;
+    // B
+    e.visible = wp.IsVisible;
+    e.name_shown = wp.IsNameVisible;
+    e.active = wp.IsActive;
+    e.scamin = wp.scamin;
+    e.scamin_on = wp.b_useScamin;
+    e.scamax = wp.scamax;
+    e.arrival_radius = wp.m_WaypointArrivalRadius;
+    e.planned_speed = wp.m_PlannedSpeed;
+    e.etd = wp.m_ETD.IsValid() ? (long long)wp.m_ETD.GetTicks() : 0;
+    e.tide_station = wp.m_TideStation;
+    e.rr_count = wp.nrange_rings;
+    e.rr_space = wp.RangeRingSpace;
+    e.rr_units = wp.RangeRingSpaceUnits;
+    e.rr_color = ColorToHex(wp.RangeRingColor);
+    e.rr_show = wp.m_bShowWaypointRangeRings;
+    if (wp.m_HyperlinkList)
+    {
+        Plugin_HyperlinkList::compatibility_iterator n =
+            wp.m_HyperlinkList->GetFirst();
+        while (n)
+        {
+            Plugin_Hyperlink *h = n->GetData();
+            if (h)
+            {
+                HlEntry he;
+                he.desc = h->DescrText;
+                he.link = h->Link;
+                he.type = h->Type;
+                e.hyperlinks.push_back(he);
+            }
+            n = n->GetNext();
+        }
+    }
     return e;
 }
 
@@ -145,12 +239,26 @@ static WpEntry WpEntryFrom(const WP &wp)
 // round-trip"). Reused for standalone marks[] and for embedded route vertices.
 static nlohmann::json MarkToJson(const WpEntry &e, unsigned long long &h)
 {
+    // Change-detector canon: A fields + every carried B field, so an edit to any
+    // carried field re-syncs (sec 12). %.6f for lat/lon (lossy detector only).
     wxString canon;
     canon << "M|" << e.guid << "|" << e.name << "|"
           << wxString::Format("%.6f", e.lat) << "|"
           << wxString::Format("%.6f", e.lon) << "|"
           << e.desc << "|" << e.icon << "|"
-          << wxString::Format("%lld", e.created_ts) << "\n";
+          << wxString::Format("%lld", e.created_ts) << "|"
+          << (int)e.visible << (int)e.name_shown << (int)e.active << "|"
+          << wxString::Format("%.6f", e.scamin) << (int)e.scamin_on << "|"
+          << wxString::Format("%.6f", e.scamax) << "|"
+          << wxString::Format("%.6f", e.arrival_radius) << "|"
+          << wxString::Format("%.6f", e.planned_speed) << "|"
+          << wxString::Format("%lld", e.etd) << "|" << e.tide_station << "|"
+          << e.rr_count << wxString::Format("%.6f", e.rr_space) << e.rr_units
+          << e.rr_color << (int)e.rr_show << "|";
+    for (size_t k = 0; k < e.hyperlinks.size(); k++)
+        canon << e.hyperlinks[k].desc << "\x1f" << e.hyperlinks[k].link << "\x1f"
+              << e.hyperlinks[k].type << "\x1e";
+    canon << "\n";
     FnvUpdate(h, canon);
 
     nlohmann::json m;
@@ -161,6 +269,34 @@ static nlohmann::json MarkToJson(const WpEntry &e, unsigned long long &h)
     m["description"] = ToU8(e.desc);
     m["icon"] = ToU8(e.icon);
     m["created_ts"] = e.created_ts;
+    // B superset (sec 2A extended mark)
+    m["visible"] = e.visible;
+    m["name_shown"] = e.name_shown;
+    m["active"] = e.active;
+    m["scamin"] = e.scamin;
+    m["scamin_on"] = e.scamin_on;
+    m["scamax"] = e.scamax;
+    m["arrival_radius"] = e.arrival_radius;
+    m["planned_speed"] = e.planned_speed;
+    m["etd"] = e.etd;
+    m["tide_station"] = ToU8(e.tide_station);
+    nlohmann::json rr;
+    rr["count"] = e.rr_count;
+    rr["space"] = e.rr_space;
+    rr["units"] = e.rr_units;
+    rr["color"] = ToU8(e.rr_color);
+    rr["show"] = e.rr_show;
+    m["range_rings"] = std::move(rr);
+    nlohmann::json hl = nlohmann::json::array();
+    for (size_t k = 0; k < e.hyperlinks.size(); k++)
+    {
+        nlohmann::json o;
+        o["desc"] = ToU8(e.hyperlinks[k].desc);
+        o["link"] = ToU8(e.hyperlinks[k].link);
+        o["type"] = ToU8(e.hyperlinks[k].type);
+        hl.push_back(std::move(o));
+    }
+    m["hyperlinks"] = std::move(hl);
     return m;
 }
 
@@ -212,9 +348,11 @@ static bool json_scalar(const std::string &s, const char *key, std::string &tok)
     return !tok.empty();
 }
 
-// Parse navMate's {ok, navmate_dt, ocpn_dt} reply. Returns false if malformed.
+// Parse navMate's {ok, navmate_dt, ocpn_dt [, want_icons, lib_gen]} reply. Returns
+// false if the required DT pair is malformed. The symbol-channel fields are OPTIONAL
+// (absent until the hub ships sec 7): missing want_icons -> false, lib_gen -> 0.
 static bool ParseView(const wxString &body, bool &ok, long long &navmate_dt,
-                      long long &ocpn_dt)
+                      long long &ocpn_dt, bool &want_icons, long long &lib_gen)
 {
     std::string s = std::string(body.ToUTF8().data());
     std::string tok;
@@ -225,6 +363,24 @@ static bool ParseView(const wxString &body, bool &ok, long long &navmate_dt,
         return false;
     ocpn_dt = atoll(tok.c_str());
     ok = json_scalar(s, "ok", tok) && (tok == "true" || tok == "1");
+    want_icons = json_scalar(s, "want_icons", tok) && (tok == "true" || tok == "1");
+    lib_gen = json_scalar(s, "lib_gen", tok) ? atoll(tok.c_str()) : 0;
+
+    // protocol_version: the hub self-announces; absent == "1.0" baseline (upward-compat).
+    // Soft floor - warn once if the hub is below our MAJOR, but keep functioning.
+    std::string pv;
+    if (json_scalar(s, "protocol_version", pv) && pv.size() >= 2 &&
+        pv.front() == '"' && pv.back() == '"')
+        pv = pv.substr(1, pv.size() - 2);
+    if (pv.empty())
+        pv = "1.0";
+    static bool s_ver_warned = false;
+    if (atoi(pv.c_str()) < atoi(OE_PROTOCOL_VERSION) && !s_ver_warned)
+    {
+        s_ver_warned = true;
+        oeLog(0, 0, "WARNING: hub protocol_version %s below ours %s "
+              "(soft floor - continuing)", pv.c_str(), OE_PROTOCOL_VERSION);
+    }
     return true;
 }
 
@@ -268,7 +424,12 @@ oESeriesPi::oESeriesPi(void *ppimgr)
       m_reachable(false),
       m_last_applied_batch(0),
       m_echo_baseline_dt(0),
-      m_echo_baseline_hash(0)
+      m_echo_baseline_hash(0),
+      m_icons_ensured(false),
+      m_lib_gen(0),
+      m_need_icons_pull(false),
+      m_want_icons(false),
+      m_icons_sent(false)
 {
 }
 
@@ -283,13 +444,12 @@ int oESeriesPi::Init()
     LoadConfig();
 
     oeLogInit();
-    oeLog(0, 0, "Init: host=%s debug=%d",
+    oeLog(0, 0, "Init: v%s host=%s debug=%d", PLUGIN_VERSION_FULL,
           static_cast<const char *>(m_host_port.mb_str()), m_debug_level);
 
-    wxLogMessage("oESeries: Init - navMate spoke plugin loaded (v%d.%d.%d); "
+    wxLogMessage("oESeries: Init - navMate spoke plugin loaded (v%s); "
                  "host=%s debug=%d",
-                 PLUGIN_VERSION_MAJOR, PLUGIN_VERSION_MINOR,
-                 PLUGIN_VERSION_PATCH,
+                 PLUGIN_VERSION_FULL,
                  static_cast<const char *>(m_host_port.mb_str()),
                  m_debug_level);
 
@@ -350,8 +510,8 @@ void oESeriesPi::EnumerateAndBuild()
     marks_v.reserve(wguids.GetCount());
     for (size_t i = 0; i < wguids.GetCount(); i++)
     {
-        PlugIn_Waypoint_Ex wp;
-        if (GetSingleWaypointEx(wguids[i], &wp) && wp.GetFSStatus())
+        PlugIn_Waypoint_ExV2 wp;
+        if (GetSingleWaypointExV2(wguids[i], &wp) && wp.GetFSStatus())
             marks_v.push_back(WpEntryFrom(wp));
     }
     std::sort(marks_v.begin(), marks_v.end(),
@@ -384,13 +544,19 @@ void oESeriesPi::EnumerateAndBuild()
 
         wxString rcanon;
         rcanon << "R|" << route->m_GUID << "|" << route->m_NameString << "|"
-               << route->m_Description << "\n";
+               << route->m_StartString << "|" << route->m_EndString << "|"
+               << route->m_Description << "|" << (int)route->m_isVisible
+               << (int)route->m_isActive << "\n";
         FnvUpdate(h, rcanon);
 
         nlohmann::json rj;
         rj["guid"] = ToU8(route->m_GUID);
         rj["name"] = ToU8(route->m_NameString);
+        rj["from"] = ToU8(route->m_StartString);   // B (sec 2A extended route)
+        rj["to"] = ToU8(route->m_EndString);        // B
         rj["description"] = ToU8(route->m_Description);
+        rj["visible"] = route->m_isVisible;         // B
+        rj["active"] = route->m_isActive;           // B [R]
 
         nlohmann::json pts = nlohmann::json::array();
         int position = 0;
@@ -444,12 +610,15 @@ void oESeriesPi::EnumerateAndBuild()
             continue;
 
         wxString tcanon;
-        tcanon << "T|" << trk->m_GUID << "|" << trk->m_NameString << "\n";
+        tcanon << "T|" << trk->m_GUID << "|" << trk->m_NameString << "|"
+               << trk->m_StartString << "|" << trk->m_EndString << "\n";
         FnvUpdate(h, tcanon);
 
         nlohmann::json tj;
         tj["guid"] = ToU8(trk->m_GUID);
         tj["name"] = ToU8(trk->m_NameString);
+        tj["from"] = ToU8(trk->m_StartString);   // B (sec 2A extended track)
+        tj["to"] = ToU8(trk->m_EndString);        // B
 
         nlohmann::json pts = nlohmann::json::array();
         if (trk->pWaypointList)
@@ -552,18 +721,404 @@ static void ApplyMarkFields(PlugIn_Waypoint_ExV2 &wp, const nlohmann::json &f)
         if (ts > 0)
             wp.m_CreateTime = wxDateTime((time_t)ts);
     }
+
+    // --- B fields (sec 6). Merge-on-apply: overlay only PRESENT fields. `active`
+    // is read-only (up-only nav state), never applied. All are plain value writes
+    // (no heap), so there is no cross-DLL ownership hazard. ---
+    if (f.contains("visible") && f["visible"].is_boolean())
+        wp.IsVisible = f["visible"].get<bool>();
+    if (f.contains("name_shown") && f["name_shown"].is_boolean())
+        wp.IsNameVisible = f["name_shown"].get<bool>();
+    if (f.contains("scamin") && f["scamin"].is_number())
+        wp.scamin = f["scamin"].get<double>();
+    if (f.contains("scamin_on") && f["scamin_on"].is_boolean())
+        wp.b_useScamin = f["scamin_on"].get<bool>();
+    if (f.contains("scamax"))
+    {
+        // Trace to disambiguate the scamax round-trip (hub sends -> we apply ->
+        // UpdateSingleWaypointExV2 SetScaMax -> readback). Tells us whether the
+        // field arrived as a JSON number vs was dropped by the is_number guard.
+        if (f["scamax"].is_number())
+        {
+            wp.scamax = f["scamax"].get<double>();
+            oeLog(2, 2, "scamax field applied: %.1f", wp.scamax);
+        }
+        else
+            oeLog(2, 2, "scamax present but non-number (type=%s) - skipped",
+                  f["scamax"].type_name());
+    }
+    if (f.contains("arrival_radius") && f["arrival_radius"].is_number())
+        wp.m_WaypointArrivalRadius = f["arrival_radius"].get<double>();
+    if (f.contains("planned_speed") && f["planned_speed"].is_number())
+        wp.m_PlannedSpeed = f["planned_speed"].get<double>();
+    if (f.contains("etd") && f["etd"].is_number_integer())
+    {
+        long long ts = f["etd"].get<long long>();
+        wp.m_ETD = (ts > 0) ? wxDateTime((time_t)ts) : wxInvalidDateTime;
+    }
+    if (f.contains("tide_station") && f["tide_station"].is_string())
+        wp.m_TideStation =
+            wxString::FromUTF8(f["tide_station"].get<std::string>().c_str());
+    if (f.contains("range_rings") && f["range_rings"].is_object())
+    {
+        const nlohmann::json &rr = f["range_rings"];
+        if (rr.contains("count") && rr["count"].is_number_integer())
+            wp.nrange_rings = rr["count"].get<int>();
+        if (rr.contains("space") && rr["space"].is_number())
+            wp.RangeRingSpace = rr["space"].get<double>();
+        if (rr.contains("units") && rr["units"].is_number_integer())
+            wp.RangeRingSpaceUnits = rr["units"].get<int>();
+        if (rr.contains("color") && rr["color"].is_string())
+            wp.RangeRingColor =
+                HexToColor(wxString::FromUTF8(rr["color"].get<std::string>().c_str()));
+        if (rr.contains("show") && rr["show"].is_boolean())
+            wp.m_bShowWaypointRangeRings = rr["show"].get<bool>();
+    }
+    // hyperlinks APPLY is bench-deferred: rebuilding m_HyperlinkList crosses the
+    // plugin/OpenCPN heap boundary (Plugin_Hyperlink alloc/free ownership), which
+    // must be validated on the bench before it runs live. EMIT works; a hyperlink
+    // EDIT round-trip lands with S2 integration. Absent field -> live list preserved.
+    if (f.contains("hyperlinks"))
+        oeLog(2, 2, "hyperlinks apply deferred (bench) - emit-only for now");
 }
 
-// Assemble the full POST body from the cached inventory arrays + pending results.
+// ---- S3 symbol channel (sec 7), all main-thread (model access) ----
+
+// Direction A trip-wire (pin 5): lowercase-hex SHA-256 over the FOREIGN (non-nm:)
+// icon-name set, sorted ascending by codepoint (UTF-8 byte sort == codepoint order),
+// joined with a single '\n', no trailing newline. Names AS-IS (case-sensitive).
+wxString oESeriesPi::ComputeIconHash()
+{
+    wxArrayString names = GetIconNameArray();
+    std::vector<std::string> foreign;
+    for (size_t i = 0; i < names.GetCount(); i++)
+        if (!names[i].StartsWith(NM_ICON_PREFIX))
+            foreign.push_back(std::string(names[i].ToUTF8().data()));
+    std::sort(foreign.begin(), foreign.end());
+    std::string joined;
+    for (size_t i = 0; i < foreign.size(); i++)
+    {
+        if (i) joined += "\n";
+        joined += foreign[i];
+    }
+    return wxString::FromUTF8(oe_sha256::hex(joined).c_str());
+}
+
+// Direction A payload (sec 7 / sec 2A): the FOREIGN icon set reported UP, now with
+// 48x48 PNG rasters [PNG-only, protocol.md Turn 27/28].
+//
+// FindSystemWaypointIcon is NOT exported (dumpbin), so raster-by-name is impossible - but
+// the source FILES are locatable off-disk. Two stores:
+//   - stock markicons: GetpSharedDataLocation()/uidata/markicons/<file>.svg. Descriptive
+//     stems map <name>.svg directly; the ~43 legacy short-name aliases need the table
+//     below (transcribed from core WayPointmanGui::ProcessDefaultIcons, Release_5.12.4).
+//   - user icons:  GetpPrivateApplicationDataLocation()/UserIcons/<name>.{svg,png,xpm}.
+// A user file of the same name OVERRIDES the stock icon (core substitutes by name) and
+// marks the entry builtin:false. Names with no locatable file (other-plugin in-memory
+// injects) stay fmt:"none". All rasterizing runs on the MAIN thread (BuildPostBody is
+// called from OnTimer), so wxBitmap/GetBitmapFromSVGFile are safe; want_icons is
+// fetch-on-demand so this full sweep is occasional.
+
+struct LegacyIcon { const char *key; const char *file; };
+static const LegacyIcon LEGACY_ICONS[] = {
+    { "empty",        "Symbol-Empty.svg" },
+    { "triangle",     "Symbol-Triangle.svg" },
+    { "activepoint",  "1st-Active-Waypoint.svg" },
+    { "boarding",     "Marks-Boarding-Location.svg" },
+    { "airplane",     "Hazard-Airplane.svg" },
+    { "anchorage",    "1st-Anchorage.svg" },
+    { "anchor",       "Symbol-Anchor2.svg" },
+    { "boundary",     "Marks-Boundary.svg" },
+    { "buoy1",        "Marks-Buoy-TypeA.svg" },
+    { "buoy2",        "Marks-Buoy-TypeB.svg" },
+    { "campfire",     "Activity-Campfire.svg" },
+    { "camping",      "Activity-Camping.svg" },
+    { "coral",        "Sea-Floor-Coral.svg" },
+    { "fishhaven",    "Activity-Fishing.svg" },
+    { "fishing",      "Activity-Fishing.svg" },
+    { "fish",         "Activity-Fishing.svg" },
+    { "float",        "Marks-Mooring-Buoy.svg" },
+    { "food",         "Service-Food.svg" },
+    { "greenlite",    "Marks-Light-Green.svg" },
+    { "kelp",         "Sea-Floor-Sea-Weed.svg" },
+    { "light",        "Marks-Light-TypeA.svg" },
+    { "light1",       "Marks-Light-TypeB.svg" },
+    { "litevessel",   "Marks-Light-Vessel.svg" },
+    { "mob",          "1st-Man-Overboard.svg" },
+    { "mooring",      "Marks-Mooring-Buoy.svg" },
+    { "oilbuoy",      "Marks-Mooring-Buoy-Super.svg" },
+    { "platform",     "Hazard-Oil-Platform.svg" },
+    { "redgreenlite", "Marks-Light-Red-Green.svg" },
+    { "redlite",      "Marks-Light-Red.svg" },
+    { "rock1",        "Hazard-Rock-Exposed.svg" },
+    { "rock2",        "Hazard-Rock-Awash.svg" },
+    { "sand",         "Hazard-Sandbar.svg" },
+    { "scuba",        "Activity-Diving-Scuba-Flag.svg" },
+    { "shoal",        "Hazard-Sandbar.svg" },
+    { "snag",         "Hazard-Snag.svg" },
+    { "square",       "Symbol-Square.svg" },
+    { "diamond",      "1st-Diamond.svg" },
+    { "circle",       "Symbol-Circle.svg" },
+    { "wreck1",       "Hazard-Wreck1.svg" },
+    { "wreck2",       "Hazard-Wreck2.svg" },
+    { "xmblue",       "Symbol-X-Small-Blue.svg" },
+    { "xmgreen",      "Symbol-X-Small-Green.svg" },
+    { "xmred",        "Symbol-X-Small-Red.svg" },
+};
+
+// <base>/<sub>/ with a guaranteed trailing separator; empty if base is null/empty.
+static wxString IconDirWith(const wxString *base, const char *sub)
+{
+    if (!base || base->IsEmpty()) return wxString();
+    wxString d = *base;
+    if (d.Last() != wxFILE_SEP_PATH) d += wxFILE_SEP_PATH;
+    d += sub; d += wxFILE_SEP_PATH;
+    return d;
+}
+
+// A user-supplied icon file for `name` (svg/png/xpm), or empty. Presence => builtin:false.
+static wxString UserIconFile(const wxString &name)
+{
+    wxString dir = IconDirWith(GetpPrivateApplicationDataLocation(), "UserIcons");
+    if (dir.IsEmpty()) return wxString();
+    static const char *const kExt[] = { ".svg", ".png", ".xpm" };
+    for (const char *e : kExt)
+    {
+        wxString f = dir + name + e;
+        if (wxFileName::FileExists(f)) return f;
+    }
+    return wxString();
+}
+
+// The stock markicon SVG file for `name` (legacy alias or descriptive stem), or empty.
+static wxString StockIconFile(const wxString &name)
+{
+    wxString dir = IconDirWith(GetpSharedDataLocation(), "uidata");
+    if (dir.IsEmpty()) return wxString();
+    dir += "markicons"; dir += wxFILE_SEP_PATH;
+    for (const LegacyIcon &li : LEGACY_ICONS)
+        if (name == li.key)
+        {
+            wxString f = dir + li.file;
+            if (wxFileName::FileExists(f)) return f;
+        }
+    wxString stem = dir + name + ".svg";
+    if (wxFileName::FileExists(stem)) return stem;
+    return wxString();
+}
+
+// Content-fill an image into a 48x48 RGBA box: crop to the alpha CONTENT bounding box,
+// then scale that content (aspect-preserved) to fit a 44px target - a small uniform
+// breathing margin - centered on a transparent 48x48 canvas. Stock markicon SVGs have a
+// glyph small inside a padded viewBox; rendering large + cropping here puts the icon's
+// resolution in the cell, so the consumer only ever DOWNSCALES (crisp), never upscales.
+static wxImage ContentFill48(wxImage img)
+{
+    const int BOX = 48;
+    const int FIT = 44;   // content target within the 48 box (breathing margin)
+    int w = img.GetWidth(), h = img.GetHeight();
+    if (w <= 0 || h <= 0) return img;
+    if (!img.HasAlpha()) img.InitAlpha();
+
+    // Tight alpha content bounding box.
+    const unsigned char *a = img.GetAlpha();
+    int minx = w, miny = h, maxx = -1, maxy = -1;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++)
+            if (a[y * w + x] != 0)
+            {
+                if (x < minx) minx = x;
+                if (x > maxx) maxx = x;
+                if (y < miny) miny = y;
+                if (y > maxy) maxy = y;
+            }
+
+    wxImage canvas(BOX, BOX);
+    canvas.InitAlpha();
+    unsigned char *ca = canvas.GetAlpha();
+    for (int k = 0; k < BOX * BOX; k++) ca[k] = 0;   // transparent
+    if (maxx < minx || maxy < miny)
+        return canvas;   // fully transparent source
+
+    int cw = maxx - minx + 1, ch = maxy - miny + 1;
+    wxImage content = img.GetSubImage(wxRect(minx, miny, cw, ch));
+    double s = (double)FIT / (cw >= ch ? cw : ch);
+    int nw = wxMax(1, (int)(cw * s + 0.5));
+    int nh = wxMax(1, (int)(ch * s + 0.5));
+    content = content.Scale(nw, nh, wxIMAGE_QUALITY_HIGH);
+    if (!content.HasAlpha()) content.InitAlpha();
+    canvas.Paste(content, (BOX - nw) / 2, (BOX - nh) / 2);
+    return canvas;
+}
+
+// Rasterize an icon source file to a 48x48 RGBA PNG; fill b64 + sha256. false on failure.
+static bool RasterizeIconPng(const wxString &file, std::string &b64, std::string &hash)
+{
+    wxImage img;
+    if (wxFileName(file).GetExt().Lower() == "svg")
+    {
+        // Render LARGE (not 48) so the glyph inside the padded viewBox has real pixels;
+        // ContentFill48 then crops to content and downscales to fit 48 - crisp, no upscale.
+        wxBitmap bmp = GetBitmapFromSVGFile(file, 256, 256);
+        if (!bmp.IsOk()) return false;
+        img = bmp.ConvertToImage();
+    }
+    else if (!img.LoadFile(file))
+        return false;
+    if (!img.IsOk()) return false;
+    img = ContentFill48(img);
+    if (!wxImage::FindHandler(wxBITMAP_TYPE_PNG))
+        wxImage::AddHandler(new wxPNGHandler);
+    wxMemoryOutputStream mos;
+    if (!img.SaveFile(mos, wxBITMAP_TYPE_PNG)) return false;
+    size_t len = (size_t)mos.GetLength();
+    if (len == 0) return false;
+    std::vector<unsigned char> buf(len);
+    mos.CopyTo(buf.data(), len);
+    b64 = std::string(wxBase64Encode(buf.data(), len).ToUTF8().data());
+    hash = oe_sha256::hex(std::string((const char *)buf.data(), len));
+    return true;
+}
+
+wxString oESeriesPi::BuildOcpnIcons()
+{
+    wxArrayString names = GetIconNameArray();
+    nlohmann::json arr = nlohmann::json::array();
+    int n_png = 0, n_none = 0;
+    for (size_t i = 0; i < names.GetCount(); i++)
+    {
+        if (names[i].StartsWith(NM_ICON_PREFIX))
+            continue;
+        const wxString &name = names[i];
+
+        wxString user = UserIconFile(name);
+        bool builtin = user.IsEmpty();
+        wxString file = builtin ? StockIconFile(name) : user;
+
+        nlohmann::json o;
+        o["name"] = ToU8(name);
+        o["description"] = ToU8(name);   // api-20 exposes no per-icon description
+        o["builtin"] = builtin;
+
+        std::string b64, hash;
+        bool ok = false;
+        try { ok = !file.IsEmpty() && RasterizeIconPng(file, b64, hash); }
+        catch (...) { ok = false; }   // one bad icon must never zero the whole payload
+        if (ok)
+        {
+            o["fmt"] = "png";
+            o["data_b64"] = b64;
+            o["byte_hash"] = hash;
+            n_png++;
+        }
+        else
+        {
+            o["fmt"] = "none";           // no locatable source (e.g. other-plugin inject)
+            o["data_b64"] = std::string();
+            o["byte_hash"] = std::string();
+            n_none++;
+        }
+        arr.push_back(std::move(o));
+    }
+    oeLog(1, 0, "BuildOcpnIcons: %d png, %d names-only", n_png, n_none);
+    return wxString::FromUTF8(arr.dump(-1, ' ', true).c_str());
+}
+
+// Direction B (pin 2/6): parse a ?icons=1 body {lib_gen, nm_icons:[...]} and register
+// each via AddCustomWaypointIcon (session-only registration, sec 7). Returns count
+// registered, or <0 on a parse failure; lib_gen_out carries the body's lib_gen.
+int oESeriesPi::RegisterNmIcons(const wxString &body, long long &lib_gen_out)
+{
+    lib_gen_out = 0;
+    nlohmann::json j;
+    try
+    {
+        j = nlohmann::json::parse(std::string(body.ToUTF8().data()));
+    }
+    catch (...)
+    {
+        return -1;
+    }
+    if (j.contains("lib_gen") && j["lib_gen"].is_number_integer())
+        lib_gen_out = j["lib_gen"].get<long long>();
+    if (!j.contains("nm_icons") || !j["nm_icons"].is_array())
+        return -1;
+    if (!wxImage::FindHandler(wxBITMAP_TYPE_PNG))
+        wxImage::AddHandler(new wxPNGHandler);
+    int n = 0;
+    for (const nlohmann::json &ic : j["nm_icons"])
+    {
+        std::string key = ic.value("key", std::string());
+        std::string b64 = ic.value("data_b64", std::string());
+        std::string desc = ic.value("description", std::string());
+        std::string fmt = ic.value("fmt", std::string("png"));
+        if (key.empty() || b64.empty())
+            continue;
+        // Raster PNG is the v1 floor (pin 2/3). fmt "svg" (GetBitmapFromSVGFile) is
+        // deferred - it needs a temp file path, not a byte stream.
+        if (fmt != "png")
+            continue;
+        wxMemoryBuffer raw = wxBase64Decode(wxString::FromUTF8(b64.c_str()));
+        wxMemoryInputStream mis(raw.GetData(), raw.GetDataLen());
+        wxImage img;
+        if (!img.LoadFile(mis, wxBITMAP_TYPE_PNG))
+            continue;
+        wxBitmap bmp(img);
+        if (!bmp.IsOk())
+            continue;
+        wxString wkey = wxString::FromUTF8(key.c_str());
+        wxString wdesc = wxString::FromUTF8(desc.c_str());
+        if (AddCustomWaypointIcon(&bmp, wkey, wdesc))
+            n++;
+    }
+    oeLog(1, 0, "registered %d nm: icon(s) (lib_gen=%lld)", n, lib_gen_out);
+    return n;
+}
+
+// Ordering gate (sec 7): true if a command's `icon` (or any embedded route-point
+// mark icon) is an nm: key, which must not be applied until icons_ensured.
+static bool JsonIconIsNm(const nlohmann::json &f)
+{
+    if (f.is_object() && f.contains("icon") && f["icon"].is_string())
+        return f["icon"].get<std::string>().rfind(NM_ICON_PREFIX, 0) == 0;
+    return false;
+}
+static bool CommandRefsNmIcon(const nlohmann::json &cmd)
+{
+    if (!cmd.contains("fields") || !cmd["fields"].is_object())
+        return false;
+    const nlohmann::json &f = cmd["fields"];
+    if (JsonIconIsNm(f))
+        return true;
+    if (f.contains("points") && f["points"].is_array())
+        for (const nlohmann::json &pt : f["points"])
+            if (pt.contains("mark") && JsonIconIsNm(pt["mark"]))
+                return true;
+    return false;
+}
+
+// Assemble the full POST body from the cached inventory arrays + pending results,
+// plus the symbol-channel report (icon_hash always; ocpn_icons only when the hub
+// asked, sec 7 Direction A).
 wxString oESeriesPi::BuildPostBody()
 {
+    wxString icons = wxString("[]");
+    if (m_want_icons)
+    {
+        icons = BuildOcpnIcons();
+        m_icons_sent = true;   // delivered for this want_icons request (rising-edge gate)
+    }
     wxString b;
-    b << "{\"dt\":" << DtStr(m_dt_ocpn)
+    b << "{\"protocol_version\":\"" << OE_PROTOCOL_VERSION << "\""
+      << ",\"dt\":" << DtStr(m_dt_ocpn)
       << ",\"marks\":"   << (m_marks_json.IsEmpty()  ? wxString("[]") : m_marks_json)
       << ",\"routes\":"  << (m_routes_json.IsEmpty() ? wxString("[]") : m_routes_json)
       << ",\"tracks\":"  << (m_tracks_json.IsEmpty() ? wxString("[]") : m_tracks_json)
       << ",\"results\":"
       << (m_pending_results.IsEmpty() ? wxString("[]") : m_pending_results)
+      << ",\"icon_hash\":\"" << ComputeIconHash() << "\""
+      << ",\"icons_ensured\":" << (m_icons_ensured ? "true" : "false")
+      << ",\"ocpn_icons\":" << icons
       << "}";
     return b;
 }
@@ -579,10 +1134,11 @@ static bool RouteExists(const wxString &guid)
     return false;
 }
 
-// True if a track with this GUID already exists. Tracks are immutable, so an
-// existing guid means "already applied" - re-adding it (which happens when a
-// command batch is re-GET before its results retire it) duplicates the track and
-// corrupts the model. This guard makes track add idempotent (cf. RouteExists).
+// True if a track with this GUID already exists. An existing guid routes an
+// add/update through UpdatePlugInTrack (upsert) instead of AddPlugInTrack - the
+// latter would DUPLICATE the track (a re-GET of a not-yet-retired batch re-applies
+// it). Tracks ARE editable in place (protocol sec 11): UpdatePlugInTrack is
+// internally delete+reinsert, GUID-preserving, rebuilding from the passed points.
 static bool TrackExists(const wxString &guid)
 {
     wxArrayString a = GetTrackGUIDArray();
@@ -608,12 +1164,22 @@ static bool ApplyRouteObject(const wxString &guid, const nlohmann::json &fields,
     }
     PlugIn_Route_ExV2 route;
     route.m_GUID = guid;
+    route.m_isVisible = true;   // default; overridden by the `visible` B field below
     if (fields.contains("name") && fields["name"].is_string())
         route.m_NameString =
             wxString::FromUTF8(fields["name"].get<std::string>().c_str());
     if (fields.contains("description") && fields["description"].is_string())
         route.m_Description =
             wxString::FromUTF8(fields["description"].get<std::string>().c_str());
+    // B fields (sec 6). `active` is read-only, never applied.
+    if (fields.contains("from") && fields["from"].is_string())
+        route.m_StartString =
+            wxString::FromUTF8(fields["from"].get<std::string>().c_str());
+    if (fields.contains("to") && fields["to"].is_string())
+        route.m_EndString =
+            wxString::FromUTF8(fields["to"].get<std::string>().c_str());
+    if (fields.contains("visible") && fields["visible"].is_boolean())
+        route.m_isVisible = fields["visible"].get<bool>();
 
     Plugin_WaypointExV2List *lst = new Plugin_WaypointExV2List;
     if (fields.contains("points") && fields["points"].is_array())
@@ -645,9 +1211,16 @@ static bool ApplyRouteObject(const wxString &guid, const nlohmann::json &fields,
 }
 
 // Build a PlugIn_Track from a flat track object {name, points:[{lat,lon,ts}]} and
-// add it. Same copy-semantics/cleanup discipline as routes.
+// add-or-update it. Same copy-semantics/cleanup discipline as routes.
+//
+// exists -> UpdatePlugInTrack, else AddPlugInTrack. UpdatePlugInTrack is internally
+// DeleteTrack + AddPlugInTrack (OpenCPN 5.12.4, source-verified): it PRESERVES the
+// GUID but REBUILDS the track from the passed pWaypointList - so we MUST pass the
+// FULL point list (protocol sec 8/11), which the inbound track object always
+// carries. This is the fix for the winOCPN track-rename bug (a rename arrives as an
+// add-of-existing-GUID that previously no-op'd).
 static bool ApplyTrackObject(const wxString &guid, const nlohmann::json &fields,
-                             wxString &err)
+                             bool exists, wxString &err)
 {
     if (!fields.is_object())
     {
@@ -659,6 +1232,12 @@ static bool ApplyTrackObject(const wxString &guid, const nlohmann::json &fields,
     if (fields.contains("name") && fields["name"].is_string())
         track.m_NameString =
             wxString::FromUTF8(fields["name"].get<std::string>().c_str());
+    if (fields.contains("from") && fields["from"].is_string())   // B
+        track.m_StartString =
+            wxString::FromUTF8(fields["from"].get<std::string>().c_str());
+    if (fields.contains("to") && fields["to"].is_string())        // B
+        track.m_EndString =
+            wxString::FromUTF8(fields["to"].get<std::string>().c_str());
 
     Plugin_WaypointList *lst = new Plugin_WaypointList;
     if (fields.contains("points") && fields["points"].is_array())
@@ -680,17 +1259,26 @@ static bool ApplyTrackObject(const wxString &guid, const nlohmann::json &fields,
         }
     }
     track.pWaypointList = lst;
-    oeLog(2, 2, "track: pre-AddPlugInTrack, %d points", (int)lst->GetCount());
-    bool ok = AddPlugInTrack(&track, true);
-    oeLog(2, 2, "track: post-AddPlugInTrack ok=%d", (int)ok);
+    const char *call = exists ? "UpdatePlugInTrack" : "AddPlugInTrack";
+    oeLog(2, 2, "track: pre-%s, %d points", call, (int)lst->GetCount());
+    bool ok = exists ? UpdatePlugInTrack(&track) : AddPlugInTrack(&track, true);
+    oeLog(2, 2, "track: post-%s ok=%d", call, (int)ok);
+    // Free the waypoint DATA we allocated (the dtor won't - see below), but do
+    // NOT `delete lst` or null track.pWaypointList. ~PlugIn_Track() (core,
+    // ocpn_plugin_gui.cpp) unconditionally runs pWaypointList->DeleteContents(false)
+    // + Clear() + delete pWaypointList with NO null guard. Nulling the list (as the
+    // route path safely can - ~PlugIn_Route_ExV2 IS null-guarded) makes that dtor
+    // deref nullptr and CRASH OpenCPN when the stack `track` unwinds. DeleteContents(
+    // false) tells the dtor NOT to free the waypoint data (we own it, freed just
+    // below); we hand it the still-valid container to Clear() + delete. Net: each
+    // waypoint freed once (here), the list container freed once (dtor) - no
+    // double-free, no null-deref, no leak.
     for (Plugin_WaypointList::compatibility_iterator n = lst->GetFirst(); n;
          n = n->GetNext())
         delete n->GetData();
-    delete lst;
-    track.pWaypointList = nullptr;
     oeLog(2, 2, "track: cleanup done");
     if (!ok)
-        err = "AddPlugInTrack failed";
+        err = exists ? "UpdatePlugInTrack failed" : "AddPlugInTrack failed";
     return ok;
 }
 
@@ -759,6 +1347,7 @@ void oESeriesPi::ApplyGetView(const wxString &body)
             }
             else if (type == "state")
             {
+                d["version"] = PLUGIN_VERSION_FULL;   // internal X.Y.Z.NNN of the running build
                 d["reachable"] = m_reachable;
                 d["synced"] = m_synced;
                 d["want_post"] = m_want_post;
@@ -784,6 +1373,12 @@ void oESeriesPi::ApplyGetView(const wxString &body)
                     d["guid"] = ToU8(route->m_GUID);
                     d["name"] = ToU8(route->m_NameString);
                     d["description"] = ToU8(route->m_Description);
+                    // B fields (sec 6) so the hub can OBSERVE they applied, not
+                    // just infer it - GetRouteExV2_Plugin fills these from the model
+                    // (core: m_RouteStartString/m_RouteEndString/IsVisible).
+                    d["from"] = ToU8(route->m_StartString);
+                    d["to"] = ToU8(route->m_EndString);
+                    d["visible"] = route->m_isVisible;
                     nlohmann::json pts = nlohmann::json::array();
                     int position = 0;
                     if (route->pWaypointList)
@@ -811,6 +1406,11 @@ void oESeriesPi::ApplyGetView(const wxString &body)
                 {
                     d["guid"] = ToU8(trk->m_GUID);
                     d["name"] = ToU8(trk->m_NameString);
+                    // B fields (sec 6): from/to so the hub can observe track
+                    // rename/from-to edits (GetTrack_Plugin fills these from the
+                    // model's m_TrackStartString/m_TrackEndString).
+                    d["from"] = ToU8(trk->m_StartString);
+                    d["to"] = ToU8(trk->m_EndString);
                     int n = 0;
                     long long first_ts = 0, last_ts = 0;
                     if (trk->pWaypointList)
@@ -846,6 +1446,18 @@ void oESeriesPi::ApplyGetView(const wxString &body)
             continue;
         }
 
+        // Ordering gate (sec 7): hold any command whose icon (or an embedded route
+        // point's mark icon) is an nm: key until the nm: library is registered, so a
+        // navMate-origin mark never renders as a fallback glyph. The hub retries;
+        // once icons_ensured the apply proceeds on a later GET.
+        if ((op == "add" || op == "update") && !m_icons_ensured &&
+            CommandRefsNmIcon(cmd))
+        {
+            r["error"] = "nm: icon not registered yet (ordering gate)";
+            results.push_back(std::move(r));
+            continue;
+        }
+
         // Mutating ops. Increment (i): marks only; routes/tracks in (ii).
         if (type == "mark")
         {
@@ -877,7 +1489,16 @@ void oESeriesPi::ApplyGetView(const wxString &body)
                 {
                     if (cmd.contains("fields"))
                         ApplyMarkFields(wp, cmd["fields"]);
+                    // scamax probe: log the struct going IN, then re-read the model
+                    // immediately after, to localize the scamax=0 puzzle to core
+                    // SetScaMax vs a later reload (both scamax + scamin for context).
+                    oeLog(2, 2, "scamax pre-Update: wp.scamax=%.1f wp.scamin=%.1f",
+                          wp.scamax, wp.scamin);
                     r["ok"] = UpdateSingleWaypointExV2(&wp);
+                    PlugIn_Waypoint_ExV2 rb;
+                    if (GetSingleWaypointExV2(g, &rb))
+                        oeLog(2, 2, "scamax post-Update model: scamax=%.1f scamin=%.1f",
+                              rb.scamax, rb.scamin);
                     if (!r["ok"].get<bool>())
                         r["error"] = "UpdateSingleWaypointExV2 failed";
                 }
@@ -907,9 +1528,23 @@ void oESeriesPi::ApplyGetView(const wxString &body)
                 else
                 {
                     wxString err;
-                    bool ok = ApplyRouteObject(
-                        g, cmd.value("fields", nlohmann::json::object()), exists,
-                        err);
+                    bool ok = false;
+                    try   // degrade a bad apply to ok:false, never crash the loop
+                    {     // (NOTE: catches C++ exceptions only, not SEH/AVs)
+                        ok = ApplyRouteObject(
+                            g, cmd.value("fields", nlohmann::json::object()),
+                            exists, err);
+                    }
+                    catch (const std::exception &e)
+                    {
+                        err = wxString::FromUTF8(e.what());
+                        oeLog(0, 1, "route apply threw: %s", e.what());
+                    }
+                    catch (...)
+                    {
+                        err = "route apply threw (unknown)";
+                        oeLog(0, 1, "route apply threw (unknown)");
+                    }
                     r["ok"] = ok;
                     if (!ok)
                         r["error"] = std::string(err.mb_str());
@@ -930,19 +1565,37 @@ void oESeriesPi::ApplyGetView(const wxString &body)
                 DeletePlugInTrack(g);
                 r["ok"] = true;
             }
-            else if (op == "add")
+            else if (op == "add" || op == "update")
             {
-                if (TrackExists(g))
+                bool exists = TrackExists(g);
+                if (!exists && op == "update")
                 {
-                    // Idempotent: already present (e.g. a re-GET before retire).
-                    // Re-Adding would duplicate + corrupt the model.
-                    r["ok"] = true;
+                    // update-of-vanished -> err; the hub re-drives as add (sec 8).
+                    r["error"] = "update of missing track GUID";
                 }
                 else
                 {
+                    // add-of-existing = upsert -> UpdatePlugInTrack (the rename fix,
+                    // sec 8/11); add-of-new -> AddPlugInTrack. Both pass full points,
+                    // and both are idempotent under re-GET-before-retire.
                     wxString err;
-                    bool ok = ApplyTrackObject(
-                        g, cmd.value("fields", nlohmann::json::object()), err);
+                    bool ok = false;
+                    try   // degrade a bad apply to ok:false, never crash the loop
+                    {     // (NOTE: catches C++ exceptions only, not SEH/AVs)
+                        ok = ApplyTrackObject(
+                            g, cmd.value("fields", nlohmann::json::object()),
+                            exists, err);
+                    }
+                    catch (const std::exception &e)
+                    {
+                        err = wxString::FromUTF8(e.what());
+                        oeLog(0, 1, "track apply threw: %s", e.what());
+                    }
+                    catch (...)
+                    {
+                        err = "track apply threw (unknown)";
+                        oeLog(0, 1, "track apply threw (unknown)");
+                    }
                     r["ok"] = ok;
                     if (!ok)
                         r["error"] = std::string(err.mb_str());
@@ -950,7 +1603,7 @@ void oESeriesPi::ApplyGetView(const wxString &body)
             }
             else
             {
-                r["error"] = "track update unsupported (tracks immutable, sec 11)";
+                r["error"] = "unknown op";
             }
             if (r["ok"].get<bool>())
                 applied++;
@@ -989,13 +1642,42 @@ void oESeriesPi::OnTimer()
                 m_reachable = true;
                 wxLogMessage("oESeries: navMate reachable");
             }
+            if (res.tag == TAG_ICONS)
+            {
+                // ?icons=1 reply {lib_gen, nm_icons[]} - NOT the view shape. Register
+                // the nm: set; do not run ParseView/ApplyGetView on this body.
+                long long lg = 0;
+                if (RegisterNmIcons(res.body, lg) >= 0)
+                {
+                    m_icons_ensured = true;
+                    m_lib_gen = lg;
+                    m_need_icons_pull = false;
+                }
+            }
+            else
+            {
             bool ok = false;
             long long ndt = 0, odt = 0;
-            if (ParseView(res.body, ok, ndt, odt))
+            bool want_icons = false;
+            long long lib_gen = 0;
+            if (ParseView(res.body, ok, ndt, odt, want_icons, lib_gen))
             {
                 m_navmate_dt = ndt;
+                // Symbol channel (sec 7): remember want_icons for the next POST; a
+                // lib_gen advance vs what we registered triggers a ?icons=1 pull.
+                // lib_gen==0 => hub has no symbol channel yet (no-op).
+                m_want_icons = want_icons;
+                if (lib_gen > 0 && lib_gen != m_lib_gen)
+                    m_need_icons_pull = true;
                 bool matched = ((unsigned long long)odt == m_dt_ocpn);
                 m_want_post = !matched;
+                // Fetch-on-demand: a want_icons request must FORCE a POST even when the
+                // inventory is stable, or the icon payload never rides (only a DT change
+                // sets want_post otherwise). Send once per want_icons rising edge.
+                if (m_want_icons && !m_icons_sent)
+                    m_want_post = true;
+                if (!m_want_icons)
+                    m_icons_sent = false;
                 if (res.tag == TAG_POST)
                 {
                     oeLog(matched ? 0 : 1, 1,
@@ -1035,6 +1717,7 @@ void oESeriesPi::OnTimer()
                       res.tag == TAG_POST ? "POST" : "GET",
                       static_cast<const char *>(res.body.Left(200).mb_str()));
             }
+            }   // end else (non-TAG_ICONS reply)
         }
         else
         {
@@ -1057,7 +1740,12 @@ void oESeriesPi::OnTimer()
         wxString host;
         int port;
         ParseHostPort(m_host_port, host, port);
-        if (m_want_post && m_have_inventory)
+        // Priority: pull the nm: library (Direction B) before POSTing/GETing, so the
+        // ordering gate clears promptly on connect / lib_gen advance (sec 7).
+        if (m_need_icons_pull)
+            m_http->Submit(TAG_ICONS, "GET", host, port, OCPN_ICONS_PATH,
+                           wxEmptyString);
+        else if (m_want_post && m_have_inventory)
             m_http->Submit(TAG_POST, "POST", host, port, OCPN_API_PATH,
                            BuildPostBody());
         else
@@ -1189,7 +1877,10 @@ const char *oESeriesPi::GetPlugInVersionPre()
 
 const char *oESeriesPi::GetPlugInVersionBuild()
 {
-    return PKG_BUILD_INFO;
+    // Empty so OpenCPN renders a clean "0.1.0" (semantic_vers.cpp appends "+<build>"
+    // only when non-empty). The internal X.Y.NNN build stamp lives in the log/diag,
+    // not in OpenCPN's version display.
+    return "";
 }
 
 wxBitmap *oESeriesPi::GetPlugInBitmap()

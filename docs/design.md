@@ -4,7 +4,8 @@
 **Design** --
 **[Protocol](protocol.md)** --
 **[Implementation](implementation.md)** --
-**[Build](build.md)**
+**[Build](build.md)** --
+**[Releases](releases.md)**
 
 This page describes the architecture of oESeries and the enduring capabilities it
 provides. The precise wire contract lives in [Protocol](protocol.md); the code that

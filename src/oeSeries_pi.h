@@ -93,6 +93,16 @@ private:
     // (merge-on-apply, sec 8; diag channel), stash results[] for the next POST.
     void ApplyGetView(const wxString &body);
 
+    // S3 symbol channel (sec 7). Main-thread (model access) unless noted.
+    // Direction A: content hash of the FOREIGN (non-nm:) icon-name set (sec 7).
+    wxString ComputeIconHash();
+    // Direction A: the ocpn_icons[] payload (foreign names + PNG base64 + byte_hash).
+    wxString BuildOcpnIcons();
+    // Direction B: parse a ?icons=1 body, register each nm_icons[] via
+    // AddCustomWaypointIcon; returns count registered (<0 on parse failure) and the
+    // body's lib_gen in lib_gen_out.
+    int RegisterNmIcons(const wxString &body, long long &lib_gen_out);
+
     wxFileConfig *m_config;
     wxWindow *m_parent_window;
 
@@ -129,6 +139,13 @@ private:
     long long m_last_applied_batch;  // count of applied command batches (diag state)
     long long m_echo_baseline_dt;    // DT_ocpn snapshot at last apply (echo marker)
     unsigned long long m_echo_baseline_hash;  // hash snapshot at last apply
+
+    // S3 symbol channel (sec 7)
+    bool m_icons_ensured;      // nm: library registered this OpenCPN session
+    long long m_lib_gen;       // last registered navMate lib_gen (0 = none)
+    bool m_need_icons_pull;    // must GET ?icons=1 (lib_gen advanced vs registered)
+    bool m_want_icons;         // hub set want_icons in the last GET view
+    bool m_icons_sent;         // icons already delivered for the current want_icons (edge)
 
     wxBitmap m_panel_bitmap;
 };

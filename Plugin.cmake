@@ -35,7 +35,7 @@ set(OCPN_RELEASE_REPO
 # -------  Plugin setup --------
 #
 set(PKG_NAME oESeries_pi)
-set(PKG_VERSION 0.1.0) # Major.Minor.Patch
+set(PKG_VERSION 0.1) # Major.Minor - OpenCPN plugins are X.Y; EXTERNAL version, bump by hand at each public release
 set(PKG_PRERELEASE "")  # Empty, or a tag like 'beta'
 
 set(DISPLAY_NAME oESeries)    # Dialogs, installer artifacts, ...

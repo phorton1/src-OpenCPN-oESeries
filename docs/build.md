@@ -4,7 +4,8 @@
 **[Design](design.md)** --
 **[Protocol](protocol.md)** --
 **[Implementation](implementation.md)** --
-**Build**
+**Build** --
+**[Releases](releases.md)**
 
 How to build the oESeries plugin and install it for development testing. The build uses the
 standard OpenCPN plugin CMake framework (in `cmake/`), so the same `cmake --build` also

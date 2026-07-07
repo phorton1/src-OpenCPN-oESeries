@@ -21,6 +21,11 @@ endif ()
 
 include(Metadata)
 
+# oESeries: emit the release tarball + metadata into a git-TRACKED releases/ dir at the
+# repo root - persisted per public X.Y.Z version - instead of scattering timestamped
+# files in the throwaway build tree. Clean X.Y.Z names mean rebuilds overwrite one file.
+set(pkg_outdir "${CMAKE_SOURCE_DIR}/releases")
+
 if (UNIX AND NOT APPLE AND NOT QT_ANDROID)
   set(_LINUX ON)
 else ()
@@ -62,14 +67,14 @@ endif ()
 #
 set(_cs_script "
   execute_process(
-    COMMAND  cmake -E sha256sum ${CMAKE_BINARY_DIR}/${pkg_tarname}.tar.gz
-    OUTPUT_FILE ${CMAKE_BINARY_DIR}/${pkg_tarname}.sha256
+    COMMAND  cmake -E sha256sum ${pkg_outdir}/${pkg_tarname}.tar.gz
+    OUTPUT_FILE ${pkg_outdir}/${pkg_tarname}.sha256
   )
-  file(READ ${CMAKE_BINARY_DIR}/${pkg_tarname}.sha256 _SHA256)
+  file(READ ${pkg_outdir}/${pkg_tarname}.sha256 _SHA256)
   string(REGEX MATCH \"^[^ ]*\" checksum \${_SHA256} )
   configure_file(
     ${CMAKE_BINARY_DIR}/${pkg_displayname}.xml.in
-    ${CMAKE_BINARY_DIR}/${pkg_xmlname}.xml
+    ${pkg_outdir}/${pkg_xmlname}.xml
     @ONLY
   )
 ")
@@ -84,15 +89,18 @@ function (create_finish_script)
       COMMAND cmake -E rename app/files app/${pkg_displayname}
     )
     execute_process(
+      COMMAND cmake -E make_directory ${pkg_outdir}
+    )
+    execute_process(
       WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/app
       COMMAND
         cmake -E
-        tar -czf ../${pkg_tarname}.tar.gz --format=gnutar ${pkg_displayname}
+        tar -czf ${pkg_outdir}/${pkg_tarname}.tar.gz --format=gnutar ${pkg_displayname}
     )
-    message(STATUS \"Creating tarball ${pkg_tarname}.tar.gz\")
+    message(STATUS \"Creating tarball ${pkg_outdir}/${pkg_tarname}.tar.gz\")
 
     execute_process(COMMAND cmake -P ${CMAKE_BINARY_DIR}/checksum.cmake)
-    message(STATUS \"Computing checksum in ${pkg_xmlname}.xml\")
+    message(STATUS \"Computing checksum in ${pkg_outdir}/${pkg_xmlname}.xml\")
   ")
   file(WRITE "${CMAKE_BINARY_DIR}/finish_tarball.cmake" "${_finish_script}")
 endfunction ()

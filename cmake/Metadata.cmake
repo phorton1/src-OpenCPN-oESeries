@@ -115,7 +115,10 @@ if (NOT "${_pre_rel}" STREQUAL "" AND _pre_rel MATCHES "^[^-]")
   string(PREPEND _pre_rel "-")
 endif ()
 if ("${_git_tag}" STREQUAL "")
-  set(pkg_semver "${PROJECT_VERSION}${_pre_rel}+${_build_id}.${_gitversion}")
+  # oESeries: EXTERNAL version is a clean X.Y.Z (no +timestamp.hash), so the tarball
+  # name is stable and rebuilds of one version overwrite a single file. The internal
+  # build number (X.Y.Z.NNN) is carried separately in config.h, not on the wire/name.
+  set(pkg_semver "${PROJECT_VERSION}${_pre_rel}")
 else ()
   set(pkg_semver "${_git_tag}")
 endif ()
@@ -143,10 +146,12 @@ string(APPEND pkg_displayname
 # pkg_xmlname: XML metadata basename
 set(pkg_xmlname ${pkg_displayname})
 
-# pkg_tarname: Tarball basename
+# pkg_tarname: Tarball basename. oESeries drops the target-version (Windows build number)
+# from the NAME - OpenCPN imports by reading metadata.xml inside the tarball, never the
+# filename; target-version stays in the metadata for catalog OS-matching.
 string(CONCAT pkg_tarname
   "${PLUGIN_API_NAME}-${pkg_semver}"
-  "_${plugin_target}-${plugin_target_version}-${_pkg_arch}"
+  "_${plugin_target}-${_pkg_arch}"
 )
 
 # pkg_tarball_url: Tarball location at cloudsmith

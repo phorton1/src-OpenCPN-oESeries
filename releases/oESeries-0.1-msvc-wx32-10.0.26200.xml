@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- LENOVO3 - 2607071403 -->
+<plugin version="1">
+  <name> oESeries </name>
+  <version> 0.1 </version>
+  <release> 0 </release>
+  <summary> navMate spoke for OpenCPN </summary>
+
+  <api-version> 1.20 </api-version>
+  <open-source> yes </open-source>
+  <author> Patrick Horton </author>
+  <source> https://github.com/phorton1/src-OpenCPN-oESeries </source>
+  <info-url> https://github.com/phorton1/src-OpenCPN-oESeries </info-url>
+
+  <description> Makes OpenCPN a driven spoke of navMate. A polling HTTP client that mirrors
+OpenCPN's waypoints, routes and tracks to the navMate hub and applies commands
+pushed back from it.
+ </description>
+
+  <target>msvc-wx32</target>
+  <target-version>10.0.26200</target-version>
+  <target-arch>x86</target-arch>
+  <tarball-url> https://dl.cloudsmith.io/public/oeseries/oeseries-alpha/raw/names/oESeries-0.1-msvc-wx32-10.0.26200-tarball/versions/0.1/oESeries-0.1_msvc-wx32-x86.tar.gz </tarball-url>
+  <tarball-checksum> 9628cf09bfd4319be2652f8dbbd668c9cb8051763fb8fe60bbfc53d1cc499168 </tarball-checksum>
+</plugin>

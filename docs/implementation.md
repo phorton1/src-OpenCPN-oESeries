@@ -4,7 +4,8 @@
 **[Design](design.md)** --
 **[Protocol](protocol.md)** --
 **Implementation** --
-**[Build](build.md)**
+**[Build](build.md)** --
+**[Releases](releases.md)**
 
 An overview of the code that realizes the [Design](design.md) and the
 [Protocol](protocol.md). The plugin is a single Win32/x86 DLL built from a handful of

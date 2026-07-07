@@ -37,6 +37,20 @@ include(PluginCompiler)
 add_library(${CMAKE_PROJECT_NAME} SHARED EXCLUDE_FROM_ALL ${SRC})
 include_directories(BEFORE ${CMAKE_BINARY_DIR}/include)
 
+# Internal build number: bump NNN on EVERY build (PRE_BUILD) and regenerate
+# oe_buildnum.h (X.Y.Z.NNN). Counter is untracked; external version stays X.Y.Z.
+add_custom_command(
+  TARGET ${CMAKE_PROJECT_NAME} PRE_BUILD
+  COMMAND ${CMAKE_COMMAND}
+    -DCOUNTER=${CMAKE_SOURCE_DIR}/build_number.txt
+    -DHEADER=${CMAKE_BINARY_DIR}/include/oe_buildnum.h
+    -DRELEASES=${CMAKE_SOURCE_DIR}/docs/releases.md
+    -DVERSION=${PKG_VERSION}
+    -P ${CMAKE_SOURCE_DIR}/cmake/BumpBuild.cmake
+  COMMENT "Bumping internal build number (X.Y.NNN)"
+  VERBATIM
+)
+
 # oESeries is authored clean, WITHOUT an in-tree opencpn-libs submodule. Point the
 # api library at the sibling tree (default ..\opencpn_libs, api-20); overridable with
 # -DOCPN_LIBS_DIR=... An explicit binary dir is required because the source dir lives
@@ -57,6 +71,10 @@ endif ()
 
 set(VERSION_MAJOR ${PROJECT_VERSION_MAJOR})
 set(VERSION_MINOR ${PROJECT_VERSION_MINOR})
+# Plugins version as X.Y, so PATCH may be empty - default it so config.h stays valid.
+if (PROJECT_VERSION_PATCH STREQUAL "")
+  set(PROJECT_VERSION_PATCH 0)
+endif ()
 set(VERSION_PATCH ${PROJECT_VERSION_PATCH})
 if (PROJECT_VERSION_TWEAK STREQUAL "")
   set(PROJECT_VERSION_TWEAK 0)
