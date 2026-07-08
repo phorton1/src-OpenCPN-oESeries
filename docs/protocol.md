@@ -7,24 +7,11 @@
 **[Build](build.md)** --
 **[Releases](releases.md)**
 
-This is the canonical wire contract between oESeries and the hub. It was co-designed by the
-OpenCPN-plugin side and the navMate-hub side; the turn-by-turn derivation is preserved
-(unlinked) in [notes/protocol_dialog.md](notes/protocol_dialog.md). Plugin-side claims are
-grounded in the api-20 OpenCPN plugin API. Sections were tagged **[hub-review]** where
-drafted from the design dialogue and pending hub-side verification. That pass ran 2026-07-04
-against the navMate code: verified sections are now marked **[hub-verified 2026-07-04]**, and
-claims the hub has not yet implemented are called out inline as **DEFERRED (hub)** (see the
-consolidated list in sec 13). The concrete wire objects (exact JSON per type) were
-co-designed and locked 2026-07-04 in sec 2A. On 2026-07-06 the symbol channel (sec 7) and the
-all-reachable-fields extension (sec 2A / sec 6) were co-designed and folded in (derivation:
-[notes/oe_symbol_protocol.md](notes/oe_symbol_protocol.md), hub-signed-off); the sections they
-touched are tagged **[extended 2026-07-06]**. A hub-facing review the same day (oe_symbol_protocol.md
-Turn 11) trued the hub-STATE annotations to the built reality - the OCPN spoke was built +
-alpha-tested since the 2026-07-04 snapshot, so several former "DEFERRED (hub)" items (full inventory
-parse, `navmate_dt` mint, foreign-GUID persistence, the paste-target/`commands[]` path) are now
-BUILT; the genuinely-remaining hub items are consolidated in sec 13.
+This is the canonical wire contract between oESeries and the hub, co-designed by the OpenCPN-plugin
+side and the navMate-hub side. Plugin-side claims are grounded in the api-20 OpenCPN plugin API.
+**This spec is `1.0`.**
 
-## 1. Roles + transport (the floor, proven)
+## 1. Roles + transport
 
 The plugin is a polling HTTP CLIENT; the hub is the SERVER (one endpoint, `/api/ocpn`). A
 main-thread `wxTimer` heartbeat is the only clock; the plugin always initiates, the hub
@@ -37,25 +24,20 @@ simply retried on the next heartbeat.
 - **GET `/api/ocpn`** -> `{ ok, navmate_dt, ocpn_dt, icon_hash, want_icons, lib_gen,
   commands:[...] }`. `commands` is the hub->OpenCPN batch; it is non-empty exactly when
   `navmate_dt` has advanced. `icon_hash`/`want_icons`/`lib_gen` drive the symbol channel (sec 7).
-  **Until the symbol channel ships**, the hub emits the 4-field subset `{ ok, navmate_dt, ocpn_dt,
-  commands }` (`navOCPN::pollView`); the plugin MUST tolerate the symbol fields' ABSENCE (missing
-  `want_icons` = false, missing `lib_gen` = 0). These are additive envelope fields, distinct from the
-  per-object no-omit rule of sec 2A.
+  The symbol fields are OPTIONAL additive envelope fields; a peer MUST tolerate their absence
+  (missing `want_icons` = false, missing `lib_gen` = 0), distinct from the per-object no-omit rule
+  of sec 2A.
 - **POST `/api/ocpn`** body `{ dt, marks:[...], routes:[...], tracks:[...], results:[...],
   icon_hash, ocpn_icons:[...] }` -> returns the same view shape. `dt` = the plugin's current
   `DT_ocpn`; the inventory arrays are the OpenCPN->hub mirror; `results` acks the last command
   batch (sec 10); `icon_hash`/`ocpn_icons` are the OpenCPN->hub symbol report (sec 7).
-  **Hub status:** the hub parses the full inventory body (`dt`, `marks`, `routes`, `tracks`,
-  `results` -- `ingestInventory`); only the symbol-channel pair `icon_hash`/`ocpn_icons` is not yet
-  parsed (lands with sec 7).
 - **GET `/api/ocpn?icons=1`** -> `{ ok, lib_gen, nm_icons:[...] }`: the plugin PULLS navMate's
   authored symbol library (sec 7, Direction B). Mirrors `?dump=1` - a side fetch, off the
   steady-state loop.
 - Debug readback: **GET `/api/ocpn?dump=1`** adds `{ recv_count, last_recv, payload }`.
 
-## 2A. Wire objects -- the exact JSON  [locked 2026-07-04]
+## 2A. Wire objects -- the exact JSON
 
-Co-designed and locked in [notes/json_and_test_oe.md](notes/json_and_test_oe.md) (Turns 1-5).
 This is the concrete byte-level contract that sec 2's envelopes carry. navMate serializes with
 `JSON::PP`, the plugin with nlohmann -- both emit standard JSON with correct UTF-8 and escaping.
 
@@ -116,11 +98,10 @@ so either side can read what the other speaks. **This spec is `1.0`.**
   vX, I need vY") but keep functioning where the overlap allows. Never go dark on a skew.
 
 `navmate_dt` is minted by the hub's outbound command path (bumped when a command batch is queued);
-what is deferred is only the `db_version` trigger that would auto-drive it (sec 3/13). `lib_gen`
-stays `1` until navMate grows a symbol-authoring surface (sec 7). Steady state = both DTs match,
+`lib_gen` is the hub's monotonic symbol-library token (sec 7). Steady state = both DTs match,
 `icon_hash` unchanged, `lib_gen` unchanged = heartbeat only (sec 3).
 
-### mark  [extended 2026-07-06]
+### mark
 
 A-fields (mappable) + the full OpenCPN-only **B** superset (sec 6). Every B-field maps 1:1 to a
 `PlugIn_Waypoint_ExV2` member; the plugin always populates them from the live struct (no-omit rule)
@@ -191,7 +172,7 @@ GAP (api-20, omitted from the wire): no route color / line style / route-level p
   api-20 call to reference an existing mark by guid (sec 8) -- so the plugin needs each point's
   full data. Only "is a bare ref allowed" differs by direction.
 
-### track  [extended 2026-07-06]
+### track
 
 ```json
 {
@@ -208,7 +189,7 @@ sec 11). Editable in place -- rename / `from`,`to` / points -- via `UpdatePlugIn
 GAP (api-20, omitted): no track `visible` / color / style (and, unlike routes, tracks expose NO
 visibility member at all). `depth_cm`/`temp_k` are hub-only, never sent by the plugin.
 
-### icon (the symbol channel)  [extended 2026-07-06]
+### icon (the symbol channel)
 
 Same shape both directions; only the key field differs -- `name` for an OpenCPN-origin icon (up),
 `key` for a navMate `nm:` icon (down):
@@ -224,7 +205,6 @@ Same shape both directions; only the key field differs -- `name` for an OpenCPN-
 - `fmt` = `png` (a 48x48 RGBA PNG holding the icon's CONTENT scaled to FILL the box -- aspect-preserved,
   centered, with a small breathing margin -- NOT the raw SVG canvas; see sec 7) or `none` (a names-only
   entry: empty `data_b64`/`byte_hash`). **SVG never rides the wire in either direction.**
-  [PNG-only Turn 27/28; content-fill Turn 36.]
 - The plugin renders each stock/user icon SOURCE FILE large, crops to its alpha content box, and scales
   the glyph to fit the 48x48 at emit time; icons with no locatable source stay `fmt:"none"`.
 - `builtin` (Direction A only) = `true` for an OpenCPN default icon, `false`/absent for a user import;
@@ -250,7 +230,7 @@ ordering gate.
 //   'data' present only for diag ops (below).
 ```
 
-### diag commands (harness observability, sec Goal B / json_and_test_oe.md)
+### diag commands (harness observability)
 
 The plugin answers diagnostic commands via `results[].data`, giving the harness a probe into
 otherwise-invisible plugin state:
@@ -276,35 +256,22 @@ the in-memory ocdb (a spoke projection), never canonical navMate.db, so `navmate
 advances on an echo and no new command is minted. `results[]` is the independent per-command
 ack, consumed before the reconcile.
 
-### Shared risks carried from the lock -- all three BENCH-MEASURED 2026-07-05
+### Wire invariants
 
-Measured in the Mode-2 alpha (`notes/build_and_test_oe.md`), real plugin vs live hub. These are
-no longer open risks; the results are recorded here.
-
-- **R1 (layer leakage, plugin-side) -- MEASURED: LEAKS (transient).** api-20 layer exclusion
-  (`OBJECTS_NO_LAYERS`) IS a stub in 5.12.4 (the `// FIXME (dave)`). Bench-proven by staging a
-  read-only GPX layer: `GetWaypointGUIDArray` returns layer marks AND layer-route vertices,
-  `GetRouteGUIDArray` returns the layer route -- they leak into `marks[]`/`routes[]` and reach the
-  hub (which minted `0x4f` for the foreign layer guids). The leak is TRANSIENT (layer objects are
-  read-only overlays, not in navobj.db; they vanish from the sync the moment the layer is unloaded,
-  proven by a full-state-replace re-sync dropping them). Mitigations: **plugin-side** -- try the
-  layer-aware `GetRouteGUIDArray/GetTrackGUIDArray(OBJECT_LAYER_REQ)` overloads + a per-mark layer
-  check, and make `diag inventory.layer_seen` real (currently a stub). **Hub-side** -- the wire
-  cannot mark a layer object, so the hub rightly tolerates unexpected inbound and reads
-  `results[].ok` (a push back to a read-only layer object no-ops). Non-corrupting.
-- **R2 (write-side vertex GUID) -- MEASURED: PASS.** `AddPlugInRouteExV2` **preserves the caller's
-  per-vertex `m_GUID` verbatim** (bench-proven: pushed a route with 3 navMate-origin vertex guids;
-  the plugin's `diag object` readback via `GetRouteExV2_Plugin` returned the exact same 3 guids, and
-  the hub minted 0 new provenance bytes -- reversed table-free). **Routes round-trip by vertex
-  IDENTITY, not just position/order.** (Same holds for `AddSingleWaypointExV2` marks, sec 4, and
-  `AddPlugInTrack` tracks -- write-side guid preservation confirmed for all three object types.)
-- **R3 (string encoding) -- MEASURED: PASS (codepoint-equality).** Names/descriptions/icons carry
-  arbitrary UTF-8. Both sides emit strict-ASCII JSON (non-ASCII as `\uXXXX`, astral as surrogate
-  pairs -- navMate `JSON::PP` ascii, plugin nlohmann `ensure_ascii=true`), so the wire is pure ASCII
-  both directions (no HTTP charset ambiguity). The "nasty strings" fixture (quote, backslash, tab,
-  newline, forward slash, CJK U+6D77, astral emoji U+1F6A3, combining U+0301, a 0x01 control)
-  round-trips **codepoint-equal** both ways. Compare strings by codepoint after parse, numbers
-  numerically -- never byte-compare (shortest-repr doubles and escaping differ, values don't).
+- **Strings are pure-ASCII JSON both directions** (non-ASCII escaped as `\uXXXX`, astral as
+  surrogate pairs -- navMate `JSON::PP` ascii, plugin nlohmann `ensure_ascii=true`), so there is no
+  HTTP charset ambiguity. Arbitrary UTF-8 (quotes, control chars, CJK, astral emoji, combining
+  marks) round-trips codepoint-equal. **Compare strings by CODEPOINT after parse and numbers
+  NUMERICALLY -- never byte-compare** (shortest-repr doubles and escaping differ, values don't).
+- **Routes round-trip by vertex IDENTITY, not just order.** `AddPlugInRouteExV2` preserves the
+  caller's per-vertex `m_GUID` verbatim (as do `AddSingleWaypointExV2` for marks and `AddPlugInTrack`
+  for tracks); write-side GUID preservation holds for all three object types.
+- **Layer objects are wire-invisible as such.** OpenCPN's api-20 layer exclusion
+  (`OBJECTS_NO_LAYERS`) is a stub in 5.12.4, so read-only layer marks/route-vertices can leak into
+  `marks[]`/`routes[]`. The wire cannot mark an object as belonging to a layer, so the hub tolerates
+  unexpected inbound objects and reads `results[].ok` (a push back to a read-only layer object
+  no-ops). Layer objects are transient -- not in navobj.db -- and drop out of the sync when the
+  layer is unloaded. Non-corrupting.
 
 ## 3. The two-DT version gate
 
@@ -316,10 +283,9 @@ heartbeat only. Plugin loop: GET the view; if `ocpn_dt != my DT_ocpn`, POST the 
 if `navmate_dt` advanced, apply `commands` and POST `results`. The HASH (content-derived,
 over the sorted per-object key fields) is the local change DETECTOR; the DT is the wire
 TOKEN. `navmate_dt` is MINTED by the hub's outbound command path (bumped when a command batch is
-queued -- `navOCPN::enqueueCommands`, single-minter, strictly increasing); only the `db_version`
-trigger that would auto-drive the bump from a canonical navMate.db edit is deferred (sec 13).
+queued -- single-minter, strictly increasing).
 
-## 4. Identity - the GUID is the unit  [hub-verified 2026-07-04]
+## 4. Identity - the GUID is the unit
 
 The seam's unit of identity is the object GUID; a shared point is ONE object, referenced
 (not copied) by routes. Confirmed both sides: navMate's `route_waypoints` is a pure ref
@@ -331,19 +297,6 @@ locally, no table); foreign OpenCPN-born GUIDs get a row in a hub-internal forei
 (table shape is the hub's private choice) + a `0x4f` OCPN provenance byte (vs `0x4e` navMate,
 `0x46` FSH). Dispatch on the provenance byte both ways; the map makes re-enumeration idempotent.
 
-**Hub verification:** `route_waypoints` is confirmed the exact `(route_uuid, wp_uuid,
-position)` ref table (PK is `(route_uuid, position)`, so one `wp_uuid` may legally recur in a
-route). The navMate-origin GUID codec is real and reversible table-free (MAGIC = ascii
-"navMate") - it currently lives in the GPX spoke module and will be promoted to shared hub
-code. `guid` is SYNTHESIZED from the 64-bit uuid, not a stored column. Provenance bytes
-`0x4e` (navMate) and `0x46` (FSH) are minted today. **Hub status (2026-07-06): BUILT.** The `0x4f`
-OCPN mint byte and foreign-GUID persistence landed - `pushItems` loads the persisted foreign-guid
-map (`loadOCPNGuidMap`) and merges it, so a foreign OpenCPN object round-trips its ORIGINAL opaque
-guid even after the plugin forgets it. The exact table is the hub's private choice and WIRE-INVISIBLE
-(a pending refactor may replace the OCPN-specific map with one generic per-spoke shadow table);
-identity still reverses table-free for navMate-origin guids and via the hub-internal map for foreign
-ones, exactly as above.
-
 ## 5. Object model + enumeration
 
 OpenCPN gives NO edit event for marks/routes (only for track points, sec 11), so the plugin
@@ -352,16 +305,16 @@ DISCOVERS marks/routes by ENUMERATION each heartbeat.
 - **Marks** = free-standing waypoints. `GetWaypointGUIDArray()` returns EVERY RoutePoint
   (marks AND route vertices - they share one list). Classify each by
   `PlugIn_Waypoint_Ex::GetFSStatus()`: `true` -> a mark (incl. a "shared" mark reused in a
-  route); `false` -> a pure route vertex (delivered only inside its route). This split is
-  what removed the ~84 double-counted vertices seen in the first live inventory.
+  route); `false` -> a pure route vertex (delivered only inside its route). This split prevents
+  route vertices from being double-counted as marks.
 - **Routes** = `GetRouteGUIDArray()` + `GetRoute_Plugin(guid)` -> `PlugIn_Route_Ex`
   (metadata + ordered point list).
 - **Tracks** = `GetTrackGUIDArray()` + `GetTrack_Plugin(guid)` -> flat ordered point list.
 
-## 6. Field model - GUID-anchored, OpenCPN-only fields spoke-carried  [extended 2026-07-06]
+## 6. Field model - GUID-anchored, OpenCPN-only fields spoke-carried
 
-Principle: **the GUID carries the linkage.** Per Patrick's "deliver ALL reachable fields"
-decision, every field the api-20 struct exposes is now CARRIED on the wire, so navMate's winOCPN
+Principle: **the GUID carries the linkage.** Every field the api-20 struct exposes is CARRIED on
+the wire, so navMate's winOCPN
 editor is a faithful, familiar remote for OpenCPN's own property dialogs. Fields split by where
 their CANONICAL home is:
 
@@ -373,10 +326,10 @@ their CANONICAL home is:
   the LIVE ocdb spoke projection, edited ONLY in winOCPN, NOT added to navMate.db, and DROPPED at
   a paste->navMate.db boundary. Per mark: `visible`, `name_shown`, `active`[R], `scamin`/
   `scamin_on`/`scamax`, `arrival_radius`, `planned_speed`, `etd`, `tide_station`, `range_rings{}`,
-  `hyperlinks[]`. Per route: `from`/`to`, `visible`, `active`[R]. Per track: `from`/`to`. These
-  formerly-"dropped" fields are now carried; the plugin still applies them via merge-on-apply
-  (sec 8) so nothing clobbers, and the hub carries them WITHOUT a navMate.db column.
-- **hub-only ExtendedData** [hub-verified 2026-07-04]: `wp_type` (from sym), `color`, `depth_cm`,
+  `hyperlinks[]`. Per route: `from`/`to`, `visible`, `active`[R]. Per track: `from`/`to`. The plugin
+  applies them via merge-on-apply (sec 8) so nothing clobbers, and the hub carries them WITHOUT a
+  navMate.db column.
+- **hub-only ExtendedData**: `wp_type` (from sym), `color`, `depth_cm`,
   `temp_k`, `ts_source`, `source`, `collection_uuid`, `position`, `modified_ts` - navMate concepts
   with no OpenCPN home; kept hub-side by GUID, never on the wire.
 
@@ -388,18 +341,14 @@ no color (mark color IS the icon, sec 7); route - no color/style/route-speed; tr
 visible/color/style (and, unlike routes, no visibility member at all). `GetFSStatus` /
 `GetRouteMembershipCount` are read-only computed views, never settable.
 
-**`visible` (RESOLVED).** OpenCPN `IsVisible` is a stored per-point bool = "shown in OpenCPN." It
-is carried as a B field. It is ORTHOGONAL to navMate's own display-layer map-visibility
-(navVisibility); winOCPN labels the two distinctly ("Visible in OpenCPN" vs "Show on navMate map").
-This resolves the v1 `visible` deferral.
+**`visible`.** OpenCPN `IsVisible` is a stored per-point bool = "shown in OpenCPN," carried as a B
+field. It is ORTHOGONAL to navMate's own display-layer map-visibility (navVisibility); winOCPN
+labels the two distinctly ("Visible in OpenCPN" vs "Show on navMate map").
 
 `collection_uuid`/hierarchy has no OpenCPN home: OpenCPN-origin marks land in a default bucket; the
 user re-files in the hub.
 
-## 7. Symbols - a bidirectional channel  [extended 2026-07-06]
-
-**Status: DESIGNED + hub-signed-off, BUILDING NEXT on both sides** (see sec 13). This is the immediate
-next build, not a deferred item.
+## 7. Symbols - a bidirectional channel
 
 OpenCPN has NO symbol-authoring UX (43 hardcoded defaults from `ProcessDefaultIcons`; file-drop
 user import via `ProcessUserIcons`; a pick-from-dropdown selector; the only creation primitive is
@@ -412,14 +361,12 @@ and plugin-invisible. (Derivation: [notes/oe_symbol_protocol.md](notes/oe_symbol
 
 ### The api-20 primitives (plugin-side, grounded)
 - `GetIconNameArray()` - the live icon vocabulary (defaults + user + other-plugin injects).
-- `FindSystemWaypointIcon(name)` -> `wxBitmap*` - **declared in api-20 but NOT exported by
-  opencpn.exe 5.12.4 (dumpbin-confirmed 2026-07-06); unusable at link/runtime.** A foreign icon's
-  rendered raster therefore cannot be fetched by name. Consequence: **Direction A is NAMES-ONLY for
-  now** (the foreign name list + `icon_hash`; `ocpn_icons[]` entries carry `fmt:"none"`, empty
-  bytes). Bitmap-up instead rasterizes the icon's SOURCE FILE via `GetBitmapFromSVGFile` (exported);
-  the file locations are known (sec 13): `GetSharedDataDir()/uidata/markicons/` (stock SVGs) and
-  `GetPrivateDataDir()/UserIcons/` (user png/xpm/svg). `GetIconNameArray` and `AddCustomWaypointIcon`
-  ARE exported - Direction B and the vocabulary/hash are unaffected.
+- `FindSystemWaypointIcon(name)` -> `wxBitmap*` - declared in api-20 but NOT exported by
+  opencpn.exe 5.12.4, so a foreign icon's rendered raster cannot be fetched by name. Instead the
+  UP-path rasterizes the icon's SOURCE FILE via `GetBitmapFromSVGFile` (exported), from the known
+  locations `GetSharedDataDir()/uidata/markicons/` (stock SVGs) and `GetPrivateDataDir()/UserIcons/`
+  (user png/xpm/svg); an icon with no locatable source file emits `fmt:"none"` (names-only).
+  `GetIconNameArray` and `AddCustomWaypointIcon` ARE exported.
 - `GetIcon_PlugIn(name)` -> `wxBitmap` - exported (ord 296) but returns toolbar/UI STYLE icons
   (`style->GetIcon`), NOT waypoint markicons; not a raster-by-name path. Not used.
 - `AddCustomWaypointIcon(bitmap, key, description)` - the ONLY inject primitive; NO `b_permanent`
@@ -467,7 +414,7 @@ change-detection.
 A mark referencing an unregistered icon name falls back to a default at render. So the plugin holds
 an `icons_ensured` flag per connection: it will NOT apply any command whose `icon` is an `nm:` key
 until the `nm:` set is registered. A generation reset (`ocpn_dt -> 0` / restart) clears the flag ->
-re-provision. This rides the deferred generation token (sec 13); no new token.
+re-provision.
 
 ### Color is a SYMBOL feature, not a field
 `PlugIn_Waypoint_ExV2` has NO color member - a mark's color in OpenCPN IS its icon. So navMate's
@@ -476,19 +423,17 @@ as a wire field. v1 injects the fixed 36 `nm:symNN` glyphs by identity; per-`(sy
 injects are the generalization when navMate's palette exceeds its base glyphs. (This is the single
 point where the symbol channel and the field model, sec 6, couple.)
 
-### Fidelity + bench-gated unknowns
-**PNG 48x48 is THE icon-image format, both directions; SVG never rides the wire.** [locked
-2026-07-06, Turn 27/28.] navMate is raster-only (its Leaflet map uses PNG rasters, its picker is a
-raster `OwnerDrawnComboBox`), so SVG-passthrough had zero consumers and was dropped. **The 48x48 is
-the icon CONTENT scaled to fill, not the raw SVG canvas** [Turn 36]: a stock markicon's glyph sits
+### Fidelity
+**PNG 48x48 is THE icon-image format, both directions; SVG never rides the wire.** navMate is
+raster-only (its Leaflet map uses PNG rasters, its picker is a raster `OwnerDrawnComboBox`), so
+SVG-passthrough had zero consumers and was dropped. **The 48x48 is the icon CONTENT scaled to fill,
+not the raw SVG canvas**: a stock markicon's glyph sits
 small inside a padded viewBox, so the plugin renders the source SVG LARGE (256), crops to the alpha
 content bounding box, and scales the glyph to fit the 48x48 (aspect-preserved, ~44px content + a
 breathing margin). Resolution thus lives at the source; navMate only ever downscales (crisp), never
 upscales. (Trade-off, accepted: content-fill normalizes every icon to ~one size, dropping OpenCPN's
 relative-scale-on-chart -- correct for a picker; navMate renders map marks via derived syms anyway.)
-navMate decodes PNG straight into its bitmaps -- no SVG renderer either side. Verified end-to-end vs
-live v0.1.0 (Turn 35/36): `AddCustomWaypointIcon` session-only, render ordering, and the stock/user
-rasterize path all hold.
+navMate decodes PNG straight into its bitmaps -- no SVG renderer either side.
 
 ## 8. Push mechanics - field-level + merge-on-apply
 
@@ -508,9 +453,7 @@ the changed fields, and Updates - so the wider field set adds no new clobber ris
 - `update` of a vanished GUID -> `ok:false` + error; the hub re-drives as a full `add`.
 - `delete` of an absent GUID -> `ok:true` ("ensure absent"), never an error.
 - Route apply is idempotent too: check `GetRouteGUIDArray` for the route GUID -> update/skip
-  if present, never re-Add (re-Add duplicates every point). *(Bench-gated: confirm an
-  add-of-existing route metadata actually UPDATES via `AddPlugInRouteExV2`, or needs an explicit
-  update-or-skip - a winOCPN route rename will exercise this; sec 13.)*
+  if present, never re-Add (re-Add duplicates every point).
 - Track apply is idempotent: an `add`/`update` of an existing track GUID must route through
   `UpdatePlugInTrack` (`ocpn_plugin.h:3267`), NOT `AddPlugInTrack` (which duplicates). This is
   what makes a winOCPN track RENAME stick (the live bug that drove the track correction).
@@ -525,12 +468,10 @@ the changed fields, and Updates - so the wider field set adds no new clobber ris
 existing mark by GUID (`AddPlugInRoute` does `new RoutePoint(...)` per vertex). So each hub
 waypoint manifests in OpenCPN exactly ONCE - as a standalone mark XOR as a vertex inside its
 route, never both. The rare true-shared case (one point in multiple routes) is a hub-side
-manifestation policy, WIRE-INVISIBLE to the plugin. **[hub-verified 2026-07-04: model
-confirmed / policy DEFERRED]** navMate's model CAN express a shared point (`route_waypoints`
-+ `getRoutesForWaypoint`), but the mark-vs-vertex manifestation POLICY is not built yet - it
-arrives with the hub's outbound push path (Phase 2). Wire-invisible either way.
+manifestation policy, WIRE-INVISIBLE to the plugin (navMate's model can express a shared point; how
+it manifests in OpenCPN is the hub's choice, invisible to the wire either way).
 
-## 9. Gate model  [hub-verified 2026-07-04]
+## 9. Gate model
 
 navMate's navOps runs silent, side-effect-free predicate gates as preflight BEFORE any
 mutation is queued. A hub->OpenCPN push originates as a user PASTE into the hub's OpenCPN
@@ -540,14 +481,6 @@ already-transformed commands.** The OpenCPN spoke is the gentlest: upsert-by-GUI
 collision gate; unbounded OpenCPN strings remove the truncation gate; the surviving
 structural-legality gates are hub-internal and invisible. The plugin's ONLY failure channel
 is apply-results (sec 10).
-
-**Hub verification:** the silent, side-effect-free predicate gate layer is confirmed (shared
-by the menu builders and the navOps preflight; `emit_as` user_error/impl_error). The
-per-spoke absence of the collision gate (upsert) and the truncation gate (unbounded strings)
-is architecturally correct. **Hub status (2026-07-06): BUILT + alpha-tested.** The OpenCPN spoke
-IS a wired paste/push target -- `'ocpn'` is a real destination alongside `e80`/`fsh`/`database`
-(navOpsOCPN executors + the winOCPN editable pane, wired through navClipboard/navOps/navOpsDB) -- so
-the push-origination path is exercised, not merely predicted.
 
 ## 10. Command + result shapes
 
@@ -559,7 +492,7 @@ the push-origination path is exercised, not merely predicted.
 - **Result** (plugin -> hub, in `results[]`): `{ guid, op, ok, error? }` per applied command.
   Deletes map 1:1 to `DeleteSingleWaypoint` / `DeletePlugInRoute` / `DeletePlugInTrack`.
 
-## 11. Tracks  [extended 2026-07-06]
+## 11. Tracks
 
 One object (metadata + points). Metadata carries `name` + `from`/`to` (`m_StartString`/
 `m_EndString`). `track_points` is FLAT ordered on both sides
@@ -567,72 +500,17 @@ One object (metadata + points). Metadata carries `name` + `from`/`to` (`m_StartS
 segment boundaries, so segments are a non-issue between the two (they only ever mattered vs
 GPX). Per OpenCPN point = `{lat, lon, ts}` (UTC, seconds); no per-point name/icon.
 
-- **Active (recording) track = event-append.** OpenCPN fires `OCPN_TRK_POINT_ADDED`
-  (`{lat, lon, Track_ID}`, requires `WANTS_PLUGIN_MESSAGING`) per point laid down -> the
-  plugin streams incrementally (one point per event, no re-scan). Caveat: OpenCPN may PRUNE
-  a just-added point (collinear reduction), so the event stream slightly over-reports; a
-  periodic `GetTrack_Plugin` reconcile trues it up. The hub ingests whatever point set is
-  posted. Which track is "active" = the `g_pActiveTrack`; its GUID rides the event payload.
-- **Old/completed tracks** enumerate-on-change (no edit event), but they are EDITABLE:
-  `UpdatePlugInTrack` (`:3267`) preserves the caller's GUID, so a winOCPN rename or point edit
-  round-trips WITHOUT a new identity. It is internally delete+reinsert (source-verified, sec 8),
-  so the caller must pass the FULL point list. GAP (api-20): tracks expose no `visible`/color/style
-  - unlike routes, which expose `m_isVisible`; those native track properties are unreachable to a
-  plugin.
+Tracks are ENUMERATED on change like marks and routes (OpenCPN gives no track edit event). A track
+is EDITABLE in place: `UpdatePlugInTrack` preserves the caller's GUID, so a winOCPN rename or point
+edit round-trips WITHOUT a new identity. It is internally delete+reinsert (source-verified, sec 8),
+so the caller must pass the FULL point list. GAP (api-20): tracks expose no `visible`/color/style --
+unlike routes, which expose `m_isVisible`; those native track properties are unreachable to a plugin.
 
 ## 12. Delta / efficiency
 
-Full-state is the floor (proven). The efficiency ceiling falls out with no new design:
+Full-state is the floor. The efficiency ceiling falls out with no new design:
 field-level push IS the hub->OpenCPN delta; the plugin's hash+DT gate IS the OpenCPN->hub
 delta (its hash expands to cover exactly the fields carried two-way, so a change to any
 carried field re-syncs).
-
-## 13. Status - building next, parked, bench-gated  [updated 2026-07-06]
-
-Distinction: "not yet in code" (BUILDING NEXT) vs "waiting on a future surface/decision" (PARKED).
-
-**BUILDING NEXT** (designed + signed off; active build on both sides):
-- **Symbol channel (sec 7)** - both directions, tokens, ordering gate (notes/oe_symbol_protocol.md,
-  hub-signed-off). Plugin: `icon_hash`/`ocpn_icons` push + `?icons=1` pull + `nm:` registration +
-  `icons_ensured` gate. Hub: `lib_gen`/`want_icons` in the poll view + serving `?icons=1` with the
-  fixed 36-`nm:` set + ingesting `ocpn_icons` (diff by `byte_hash`). Supersedes the old static
-  `sym -> icon` table.
-- **All-reachable-fields emission (sec 2A/6)** - the wire is speced; the plugin extends its live
-  inventory to EMIT the B-fields (the alpha emits only the A-subset).
-- **Apply-path fixes (plugin)** - track-upsert via `UpdatePlugInTrack` with the FULL point list
-  FIRST (Patrick's live rename bug, sec 8/11); route add-of-existing update-or-skip guard.
-- **Hub round-trip bugs (navMate-owned, not wire issues)** - `getWaypoint` to SELECT `icon_name`
-  (icon currently write-only on round-trip); the winOCPN route_point node to carry icon/sym/comment.
-
-**DONE since (graduated from parked):**
-- **Direction-A icon IMAGES (sec 2A/7)** - BUILT + VERIFIED end-to-end vs live v0.1.0 (Turn 35/36).
-  `ocpn_icons[]` emits `fmt:"png"` + a 48x48 CONTENT-FILLED RGBA PNG + real `byte_hash` + `builtin`;
-  navMate's picker renders the stock glyphs. Sources: `GetSharedDataDir()/uidata/markicons/` (stock) +
-  `GetPrivateDataDir()/UserIcons/` (user) -> render-large + content-crop -> 48x48 PNG; other-plugin
-  in-memory injects stay `fmt:"none"`. [PNG-only Turn 27/28; content-fill Turn 36.]
-
-**PARKED** (waiting on a future surface/decision):
-- **`db_version` auto-trigger for `navmate_dt`** - `navmate_dt` is minted explicitly today
-  (paste -> enqueue, sec 3); the trigger that auto-drives it from a canonical navMate.db edit is a
-  later optimization. (A generation reset also = the plugin's "hub lost state -> full-resync" signal;
-  today's crude reset signal is `ocpn_dt` -> 0.)
-- **Symbol-authoring surface** - `lib_gen` stays `1`, and per-`(sym,color)` on-demand injects wait,
-  until navMate grows vector authoring; the fixed 36-`nm:`-glyph provisioning is current (building next).
-- **mark-vs-vertex manifestation policy (sec 8)** - hub-side, wire-invisible.
-- **Patrick's product calls** - omit-vs-grey the unreachable controls (mark color; route
-  color/style/route-speed; track visible/color/style); whether navMate adopts hyperlinks canonically
-  (else spoke-only B).
-
-**BENCH-GATED** (verify against a running OpenCPN) - `AddCustomWaypointIcon` session-only;
-icon-before-waypoint render ordering; whether add-of-existing route metadata updates via
-`AddPlugInRouteExV2` or needs an explicit guard; colorscheme tint of `FindSystemWaypointIcon`;
-stock-SVG-file reachability. *(Source-resolved from 5.12.4, no longer bench-gated: navobj.db writes
-are synchronous-inline on the `Add*/Update*` call; `UpdatePlugInTrack` = delete+reinsert preserving
-GUID -> full-point-list required, sec 8/11.)*
-
-**RESOLVED / BUILT since the 2026-07-04 review** - `visible` (now an OpenCPN-only B field, sec 6);
-and hub-side (built + alpha-tested, no longer deferred): the full inventory parse (sec 2), the
-`navmate_dt` mint via the outbound command path (sec 3), foreign-GUID persistence + the `0x4f` byte
-(sec 4), and the OpenCPN paste-target / `commands[]` outbound path (sec 9).
 
 **Next:** The [**Implementation**](implementation.md) overview ...

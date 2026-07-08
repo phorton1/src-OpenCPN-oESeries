@@ -46,9 +46,9 @@ initiates, the hub always responds.** Every heartbeat is one request that carrie
 directions:
 
 - **OpenCPN -> hub (mirror the user's edits).** OpenCPN fires **no event** when the user
-  creates or edits a mark or route, so oESeries cannot wait to be told. It **discovers**
-  state by ENUMERATION - it reads the full current set of objects, detects change, and
-  sends what differs. (Tracks are the one exception; see below.)
+  creates or edits a mark, route, or track, so oESeries cannot wait to be told. It
+  **discovers** state by ENUMERATION - it reads the full current set of objects, detects
+  change, and sends what differs.
 - **hub -> OpenCPN (apply pushes).** The plugin receives a batch of commands
   (add/update/delete by GUID) and applies them to OpenCPN's live model, then reports the
   results. Applying an update is a **field-level merge** so OpenCPN-only data is never
@@ -88,13 +88,14 @@ is the efficiency ceiling, and it falls out of the same hash+token machinery. Se
   down, the poll simply fails and is retried on the next heartbeat - quietly, indefinitely,
   self-healing. Loose coupling is a feature: either side can restart and the loop re-syncs.
 
-## Tracks - the one place OpenCPN gives an event
+## Tracks
 
-Unlike marks and routes, the **active (recording) track** does raise an event
-(`OCPN_TRK_POINT_ADDED`) each time OpenCPN lays down a point. So oESeries handles tracks
-with a split strategy: the active track is streamed by **event-append** (one point per
-event, no re-scan), while completed tracks are immutable and enumerated once, like marks.
-Details in [Protocol](protocol.md).
+Tracks are enumerated and change-detected exactly like marks and routes - the plugin reads
+the full set each heartbeat, hashes a canonical form, and sends what differs. Completed
+tracks are immutable, so once recorded they hash stably and drop out of the delta until they
+change. A track push carries the whole point list (a track apply rebuilds the object), so the
+plugin always sends the full geometry, never a metadata-only edit. Details in
+[Protocol](protocol.md).
 
 ## Logging
 

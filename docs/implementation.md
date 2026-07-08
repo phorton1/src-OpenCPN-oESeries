@@ -13,9 +13,12 @@ source files in `src/`.
 
 ## Source layout
 
-- **`oeSeries_pi.h` / `.cpp`** - the plugin class, preferences, and the main-thread sync engine
+- **`oeSeries_pi.h` / `.cpp`** - the plugin class, preferences, the main-thread sync engine
+  (marks/routes/tracks enumeration, hub-command apply, results), and the symbol/icon channel
 - **`oeSeries_log.h` / `.cpp`** - the leveled logger (own timestamped log file)
 - **`oeSeries_http.h` / `.cpp`** - the off-main-thread HTTP worker
+- **`oe_sha256.h`** - the small self-contained SHA-256 used for the icon `byte_hash`
+- **`json.hpp`** - the vendored nlohmann/json single header used for the wire payloads
 
 ## The plugin class - `oeSeries_pi`
 
@@ -61,25 +64,34 @@ wxWidgets build.
 `oeTimer` (a `wxTimer` subclass, so the plugin needn't be a `wxEvtHandler`) fires
 `OnTimer()` on the main thread every ~2 s. Each tick:
 
-1. **`EnumerateAndBuild()`** - reads OpenCPN's live waypoints (`GetWaypointGUIDArray` +
-   `GetSingleWaypointEx`), sorts them by GUID, and in one pass computes an FNV-1a hash over a
-   canonical `guid|name|lat|lon|desc|icon|visible` and builds the JSON inventory. Sorting
-   first makes the hash order-independent, so it only changes on real content change. On a
-   change it advances `DT_ocpn` (a strictly-increasing epoch-seconds token) and rebuilds the
-   POST payload.
-2. **Consume any completed HTTP result**, parse the `{ok, navmate_dt, ocpn_dt}` view, and
-   decide: if `ocpn_dt != DT_ocpn`, the hub is behind and the plugin should POST.
-3. **Issue the next request** if the worker is idle - a POST of the inventory when a resend
-   is due, otherwise a GET. One request per tick, single-flight. A failed poll (hub down) is
-   retried quietly next tick.
+1. **`EnumerateAndBuild()`** - reads OpenCPN's live **marks, routes, and tracks**
+   (`GetWaypointGUIDArray` + `GetSingleWaypointExV2`; `GetRouteGUIDArray`/`GetTrackGUIDArray`
+   with their reverse converters), sorts by GUID, and in one pass computes an FNV-1a hash over
+   a canonical form of every carried field and builds the JSON inventory. Sorting first makes
+   the hash order-independent, so it only changes on real content change. On a change it
+   advances `DT_ocpn` (a strictly-increasing epoch-seconds token) and rebuilds the POST payload.
+2. **Consume any completed HTTP result**: parse the hub's GET view, apply its `commands[]`
+   (mark/route/track add/update/delete) to OpenCPN's live model as a field-level
+   merge-on-apply, and stage the per-command `results[]` and `{op:diag}` readback for the next
+   POST. Compare the two-DT tokens by equality to decide whether OpenCPN owes the hub a POST.
+3. **Issue the next request** if the worker is idle - a POST (inventory + results, and the
+   foreign-icon vocabulary when the hub asks via `want_icons`) when a resend is due, otherwise
+   a GET. One request per tick, single-flight. A failed poll (hub down) is retried quietly next
+   tick.
 
-## What is built vs. specified
+## What is built
 
-- **Built and proven end-to-end** (against a live navMate): preferences, the logger, the
-  off-thread HTTP worker, and the marks-inventory + two-DT loop - enumerate, hash, advance
-  `DT_ocpn`, POST on change, quiesce on match, and re-sync when the user edits a waypoint.
-- **Specified but not yet built** (see [Protocol](protocol.md) sec 13): route and track
-  enumeration, the hub->OpenCPN push/apply direction (field-level merge-on-apply), the
-  active-track event-append, and the v1 wire-field change (add `created_ts`, drop `visible`).
+The full plugin is built and proven end-to-end against a live navMate:
+
+- **Preferences, the leveled logger, and the off-thread HTTP worker.**
+- **Bidirectional marks / routes / tracks sync** over the two-DT loop - enumerate, hash,
+  advance `DT_ocpn`, POST on change, quiesce on match, and re-sync on a user edit - with
+  hub->OpenCPN pushes applied as a field-level merge that preserves OpenCPN-only data, GUIDs
+  preserved verbatim in both directions, and idempotent add/update/delete.
+- **The symbol / icon channel**: the live foreign-icon vocabulary reported up with per-icon
+  `byte_hash` and a `builtin` flag, stock markicons and user icons rasterized to 48x48 PNG at
+  emit, and navMate's `nm:` library registered down via `AddCustomWaypointIcon`.
+- **Self-versioning wire** (`protocol_version` stamped both directions) and the unmanaged
+  tarball install path (OpenCPN **Import plugin**).
 
 **Next:** The [**Build**](build.md) instructions ...

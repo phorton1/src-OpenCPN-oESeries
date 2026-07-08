@@ -34,12 +34,12 @@ between versions.
 
 | date | version | notes |
 | ---- | ------- | ----- |
-| (pending) | 0.1 | Initial pre-release -- see below. Not yet released/committed; still iterating. |
+| (pending) | 0.1 | Initial public pre-release of the plugin -- see below. |
 
-### oESeries 0.1 -- initial pre-release (pending)
+### oESeries 0.1 -- initial pre-release
 
-> Not yet cut as a public build: still iterating, uncommitted. This section documents the
-> intended nature of the **initial pre-release**.
+> The initial public build. The plugin below is built, proven end-to-end against a live
+> navMate, and committed; cutting the public tarball and tag is the remaining step.
 
 First numbered build of the oESeries plugin -- OpenCPN as a driven spoke of navMate:
 
