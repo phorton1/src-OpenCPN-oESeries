@@ -1,6 +1,7 @@
 # oESeries - OpenCPN Waypoint / Route / Track Sync Plugin
 
 **Home** --
+**[Getting Started](getting_started.md)** --
 **[Design](design.md)** --
 **[Protocol](protocol.md)** --
 **[Implementation](implementation.md)** --
@@ -21,16 +22,18 @@ and an object pushed from the hub shows up on the chart.
 
 ## Documentation Outline
 
+- **[Getting Started](getting_started.md)** - install the released plugin, point it at
+  navMate, and confirm it syncs. **Start here if you just want to use it.**
 - **[Design](design.md)** - the architecture and the enduring capabilities: hub/spoke
   roles, the two sync directions, change-detection and the version gate, the threading
   model, and logging.
-- **[Protocol](protocol.md)** - the wire specification (spec v1): the endpoint, the
+- **[Protocol](protocol.md)** - the wire specification (spec 1.0): the endpoint, the
   message shapes, identity/GUID, the field model, symbols, push mechanics, and the gate
   model. This is the canonical contract between oESeries and the hub.
 - **[Implementation](implementation.md)** - an overview of the source code: the plugin
   class, the leveled logger, the off-thread HTTP worker, and the main-thread sync engine.
-- **[Build](build.md)** - the toolchain and how to build the plugin, plus the dev-test
-  install and the OpenCPN host-load notes.
+- **[Build](build.md)** - the toolchain and how to build the plugin from source, plus the
+  dev-test install and the OpenCPN host-load notes.
 
 ## Credits
 

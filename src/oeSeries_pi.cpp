@@ -79,8 +79,10 @@ static wxColour HexToColor(const wxString &s)
 
 // Preference keys / defaults
 static const char *const CONFIG_PATH = "/PlugIns/oESeries";
-// Dev default: navMate runs its dev navServer on 9883 (packaged is 9873).
-static const char *const DEFAULT_HOST_PORT = "localhost:9883";
+// Packaged default: navMate serves on 9873 (its dev navServer uses 9883).
+// Numeric IPv4, not "localhost": navMate's server is IPv4-only, and "localhost"
+// can resolve to the IPv6 address ::1 and fail to connect.
+static const char *const DEFAULT_HOST_PORT = "127.0.0.1:9873";
 static const long DEFAULT_DEBUG_LEVEL = 0;
 
 // Heartbeat cadence and the endpoint. One request per tick, single-flight.
@@ -308,11 +310,11 @@ static wxString DtStr(unsigned long long v)
     return wxString::FromUTF8(b);
 }
 
-// Split "host:port" (on the last ':'); defaults port 9883, host localhost.
+// Split "host:port" (on the last ':'); defaults port 9873, host 127.0.0.1.
 static void ParseHostPort(const wxString &hp, wxString &host, int &port)
 {
     host = hp;
-    port = 9883;
+    port = 9873;
     int idx = hp.Find(':', true);   // search from the right
     if (idx != wxNOT_FOUND)
     {
@@ -323,7 +325,7 @@ static void ParseHostPort(const wxString &hp, wxString &host, int &port)
     }
     host.Trim(true).Trim(false);
     if (host.IsEmpty())
-        host = "localhost";
+        host = "127.0.0.1";   // IPv4-only; avoid "localhost" resolving to IPv6 ::1
 }
 
 // Pull a bare scalar token (number/true/false) that follows "key": in a small,
@@ -1862,7 +1864,9 @@ int oESeriesPi::GetPlugInVersionMinor()
 
 int oESeriesPi::GetPlugInVersionPatch()
 {
-    return PLUGIN_VERSION_PATCH;
+    // NNN (the build number) IS the patch component, so OpenCPN displays X.Y.NNN
+    // (the exact build that was released). See docs/releases.md - the canonical counter.
+    return PLUGIN_BUILD_NUMBER;
 }
 
 int oESeriesPi::GetPlugInVersionPost()
@@ -1877,9 +1881,9 @@ const char *oESeriesPi::GetPlugInVersionPre()
 
 const char *oESeriesPi::GetPlugInVersionBuild()
 {
-    // Empty so OpenCPN renders a clean "0.1.0" (semantic_vers.cpp appends "+<build>"
-    // only when non-empty). The internal X.Y.NNN build stamp lives in the log/diag,
-    // not in OpenCPN's version display.
+    // Empty: NNN is reported as the patch component (GetPlugInVersionPatch), so OpenCPN
+    // renders a clean "X.Y.NNN" with no "+<build>" suffix (semantic_vers.cpp appends
+    // "+<build>" only when this is non-empty).
     return "";
 }
 

@@ -1,13 +1,14 @@
 # oESeries - Releases
 
 **[Home](readme.md)** --
+**[Getting Started](getting_started.md)** --
 **[Design](design.md)** --
 **[Protocol](protocol.md)** --
 **[Implementation](implementation.md)** --
 **[Build](build.md)** --
 **Releases**
 
-**Current build number: 11**
+**Current build number: 14**
 
 The OpenCPN plugin **tarball** for each public release is committed under
 [`releases/`](../releases/) at the repo root (it is small and self-contained) and installed
@@ -16,19 +17,24 @@ Windows** (the standard 32-bit build); built against wxWidgets 3.2.10, plugin AP
 
 ## Version scheme
 
-OpenCPN plugins are versioned **major.minor (`X.Y`)**. oESeries uses:
+The full version is **`X.Y.NNN`**:
 
-- **External `X.Y`** -- the public version (Plugin Manager; tarball filename
-  `oESeries-X.Y_msvc-wx32-<winbuild>-x86.tar.gz`). Bumped by hand at each public release.
-  Rebuilding one version overwrites its single tarball, so `releases/` holds exactly one
-  file per public version -- no pile of throwaway builds.
-- **Internal `X.Y.NNN`** -- `NNN` auto-increments on **every** build (untracked
-  `build_number.txt`), is stamped into the DLL (`Init: vX.Y.NNN ...` in the plugin log and
-  the `{op:diag,type:state}` readback), and refreshes the **Current build number** shown
-  above so this page always reflects the latest local build.
+- **`X.Y`** -- the public major.minor, owned by the author and bumped by hand at each public
+  release (`PKG_VERSION` in `Plugin.cmake`). Each published release increments at least `X`.
+- **`NNN`** -- the build number, owned by the build. It advances on **every** build, and its
+  **canonical home is the `Current build number:` line at the top of this file** -- there is no
+  `build_number.txt`. The build reads it here, increments it, writes it back, and regenerates the
+  version header the plugin compiles against.
 
-This is a release LOG, not a changelog; git history is authoritative for what changed
-between versions.
+The same `X.Y.NNN` shows through everywhere: OpenCPN's plugin display, the git tag (`vX.Y.NNN`),
+the tarball filename, and the tarball's `metadata.xml`. So the version shown in OpenCPN is exactly
+the build that was installed.
+
+> **Do not hand-edit the `Current build number:` line** -- the build owns it. Editing it desyncs
+> the counter from the built artifacts.
+
+This is a release LOG, not a changelog; git history is authoritative for what changed between
+versions.
 
 ## Releases
 

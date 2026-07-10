@@ -37,17 +37,17 @@ include(PluginCompiler)
 add_library(${CMAKE_PROJECT_NAME} SHARED EXCLUDE_FROM_ALL ${SRC})
 include_directories(BEFORE ${CMAKE_BINARY_DIR}/include)
 
-# Internal build number: bump NNN on EVERY build (PRE_BUILD) and regenerate
-# oe_buildnum.h (X.Y.Z.NNN). Counter is untracked; external version stays X.Y.Z.
+# Build number: bump NNN on EVERY build (PRE_BUILD) and regenerate oe_buildnum.h
+# (X.Y.NNN). The CANONICAL counter is docs/releases.md's "Current build number: NNN"
+# line - there is no build_number.txt. External X.Y is owned by Plugin.cmake PKG_VERSION.
 add_custom_command(
   TARGET ${CMAKE_PROJECT_NAME} PRE_BUILD
   COMMAND ${CMAKE_COMMAND}
-    -DCOUNTER=${CMAKE_SOURCE_DIR}/build_number.txt
-    -DHEADER=${CMAKE_BINARY_DIR}/include/oe_buildnum.h
     -DRELEASES=${CMAKE_SOURCE_DIR}/docs/releases.md
+    -DHEADER=${CMAKE_BINARY_DIR}/include/oe_buildnum.h
     -DVERSION=${PKG_VERSION}
     -P ${CMAKE_SOURCE_DIR}/cmake/BumpBuild.cmake
-  COMMENT "Bumping internal build number (X.Y.NNN)"
+  COMMENT "Bumping build number NNN in docs/releases.md (X.Y.NNN)"
   VERBATIM
 )
 

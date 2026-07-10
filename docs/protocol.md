@@ -1,6 +1,7 @@
 # oESeries - Sync Protocol (spec 1.0)
 
 **[Home](readme.md)** --
+**[Getting Started](getting_started.md)** --
 **[Design](design.md)** --
 **Protocol** --
 **[Implementation](implementation.md)** --

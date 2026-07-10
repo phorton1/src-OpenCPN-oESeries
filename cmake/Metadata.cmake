@@ -115,10 +115,17 @@ if (NOT "${_pre_rel}" STREQUAL "" AND _pre_rel MATCHES "^[^-]")
   string(PREPEND _pre_rel "-")
 endif ()
 if ("${_git_tag}" STREQUAL "")
-  # oESeries: EXTERNAL version is a clean X.Y.Z (no +timestamp.hash), so the tarball
-  # name is stable and rebuilds of one version overwrite a single file. The internal
-  # build number (X.Y.Z.NNN) is carried separately in config.h, not on the wire/name.
-  set(pkg_semver "${PROJECT_VERSION}${_pre_rel}")
+  # oESeries: the FULL version is X.Y.NNN. NNN is the build counter in docs/releases.md;
+  # the upcoming PRE_BUILD advances it by 1, and every configure runs BEFORE that single
+  # bump, so we anticipate it (+1) here. Result: the tarball NAME, the metadata <version>,
+  # and the DLL's own reported version all read the SAME X.Y.NNN. (cmake/BumpBuild.cmake)
+  file(READ "${CMAKE_SOURCE_DIR}/docs/releases.md" _rel_md)
+  if (_rel_md MATCHES "Current build number: ([0-9]+)")
+    math(EXPR _nnn "${CMAKE_MATCH_1} + 1")
+  else ()
+    set(_nnn 0)
+  endif ()
+  set(pkg_semver "${PROJECT_VERSION}.${_nnn}${_pre_rel}")
 else ()
   set(pkg_semver "${_git_tag}")
 endif ()

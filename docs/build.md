@@ -1,6 +1,7 @@
 # oESeries - Build
 
 **[Home](readme.md)** --
+**[Getting Started](getting_started.md)** --
 **[Design](design.md)** --
 **[Protocol](protocol.md)** --
 **[Implementation](implementation.md)** --

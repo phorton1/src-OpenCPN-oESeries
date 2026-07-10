@@ -1,6 +1,7 @@
 # oESeries - Implementation
 
 **[Home](readme.md)** --
+**[Getting Started](getting_started.md)** --
 **[Design](design.md)** --
 **[Protocol](protocol.md)** --
 **Implementation** --
