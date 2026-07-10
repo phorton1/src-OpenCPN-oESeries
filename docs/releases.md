@@ -40,12 +40,12 @@ versions.
 
 | date | version | notes |
 | ---- | ------- | ----- |
-| (pending) | 0.1 | Initial public pre-release of the plugin -- see below. |
+| 2026-07-10 | 0.1.14 | Initial public pre-release of the plugin -- see below. |
 
-### oESeries 0.1 -- initial pre-release
+### oESeries 0.1.14 -- initial pre-release
 
-> The initial public build. The plugin below is built, proven end-to-end against a live
-> navMate, and committed; cutting the public tarball and tag is the remaining step.
+> The initial public build -- built, proven end-to-end against a live navMate, committed, and
+> released as the tarball below.
 
 First numbered build of the oESeries plugin -- OpenCPN as a driven spoke of navMate:
 
